@@ -1,0 +1,343 @@
+# cryptomeria-ingest
+
+Multi-exchange crypto market data ingestion library for Rust.
+
+Connects to WebSocket feeds (OKX, Kraken, Bitstamp) and returns a stream of normalized LOB (Limit Order Book) and trade data.
+
+## Features
+
+- ✅ **Multiple exchanges**: OKX, Kraken, Bitstamp
+- ✅ **Normalized output**: Consistent `MarketDataItem` enum (`Lob` or `Trade`)
+- ✅ **LOB pre-filtering**: `max_level` or `max_level_pct` (client-side post-processing)
+- ✅ **Snapshot-first stream**: First `LobItem` is a full snapshot, followed by increments
+- ✅ **Automatic reconnection**: Exponential backoff with jitter
+- ✅ **Heartbeat handling**: Exchange-specific (Kraken) and WebSocket-level
+- ✅ **No task leaks**: Background task aborts when stream is dropped
+- ✅ **Pure functions**: Message parsing, subscription builders, display helpers are testable without I/O
+- ✅ **Async/await**: Built on Tokio + Tokio-Tungstenite
+- ✅ **Zero-cost abstractions**: No heap allocations in hot paths where possible
+
+## Installation
+
+Add this to your `Cargo.toml`:
+
+```toml
+cryptomeria-ingest = { git = "https://github.com/fibonsai/cryptomeria-ingest", branch = "main" }
+```
+
+Or use a local path if you've cloned the repo:
+
+```toml
+cryptomeria-ingest = { path = "/path/to/cryptomeria-ingest" }
+```
+
+## Quick Start
+
+```rust
+use cryptomeria_ingest::{stream, DataSourceConfig, DataKind};
+use futures_util::StreamExt;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let config = DataSourceConfig {
+        exchange: "okx".into(),
+        region: "global".into(),
+        instrument: "BTC-USDT".into(),
+        data_kind: DataKind::LOB | DataKind::TRADE, // subscribe to both
+        max_level: None,
+        max_level_pct: 0.0,
+        snapshot_depth: 400,
+        ..Default::default()
+    };
+    config.validate()?;
+
+    let mut stream = stream(config).await?;
+    while let Some(item) = stream.next().await {
+        match item? {
+            cryptomeria_ingest::MarketDataItem::Lob(lob) => {
+                println!("LOB: ts={} bids={} asks={}", lob.ts, lob.bids.len(), lob.asks.len());
+                // Process the LOB (e.g., compute mid price, spread, depth)
+            }
+            cryptomeria_ingest::MarketDataItem::Trade(trade) => {
+                println!("TRADE: ts={} price={} size={} side={}", trade.ts, trade.price, trade.size, trade.side);
+            }
+        }
+    }
+    Ok(())
+}
+```
+
+## API Reference
+
+### `DataSourceConfig`
+
+Configuration for a single market data stream.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `exchange` | `String` | Exchange name: `"okx"`, `"kraken"`, `"bitstamp"` |
+| `region` | `String` | Region: `"global"` or `"europe"` |
+| `instrument` | `String` | Instrument symbol in exchange-native format (e.g., `"BTC-USDT"` for OKX, `"XBT/USD"` for Kraken, `"BTC/USD"` for Bitstamp) |
+| `data_kind` | `DataKind` | Set of `LOB` and/or `TRADE` (use `|` for both) |
+| `max_level` | `Option<usize>` | Maximum number of price levels per side (`None` = no limit) |
+| `max_level_pct` | `f64` | Maximum percentage from best price (e.g., `1.0` for ±1%) |
+| `snapshot_depth` | `usize` | Depth for REST snapshot (Bitstamp only, default 400) |
+| `resilience` | `ResilienceConfig` | Reconnection/backoff/heartbeat settings |
+
+### `DataKind`
+
+Bitflags-style struct for specifying data types.
+
+```rust
+let lob_only = DataKind::LOB;
+let trade_only = DataKind::TRADE;
+let both = DataKind::LOB | DataKind::TRADE;
+let none = DataKind::empty();
+```
+
+### `ResilienceConfig`
+
+Fine-tune reconnection behavior.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `initial_backoff_ms` | `u64` | `1000` | Initial backoff in ms |
+| `max_backoff_ms` | `u64` | `60_000` | Maximum backoff in ms |
+| `backoff_multiplier` | `f64` | `2.0` | Multiplier per attempt |
+| `jitter_ms` | `u64` | `1000` | Random jitter in ms |
+| `heartbeat_interval_secs` | `Option<u64>` | `None` | Application-level heartbeat (Kraken) |
+| `max_attempts` | `Option<u32>` | `None` | Maximum reconnect attempts (`None` = infinite) |
+
+### `MarketDataItem`
+
+Enum returned by the stream.
+
+```rust
+enum MarketDataItem {
+    Lob(LobItem),
+    Trade(TradeItem),
+}
+```
+
+#### `LobItem`
+
+Limit Order Book snapshot or incremental update.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ts` | `u64` | Exchange timestamp in milliseconds since epoch |
+| `bids` | `Vec<LobLevel>` | Bid levels, sorted descending (best bid first) |
+| `asks` | `Vec<LobLevel>` | Ask levels, sorted ascending (best ask first) |
+
+#### `LobLevel`
+
+Single price level.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `price` | `f64` | Price |
+| `size` | `f64` | Size (quantity) |
+
+#### `TradeItem`
+
+Trade execution.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ts` | `u64` | Exchange timestamp in milliseconds since epoch |
+| `price` | `f64` | Trade price |
+| `size` | `f64` | Trade size (quantity) |
+| `side` | `String` | `"buy"` or `"sell"` |
+| `trade_id` | `Option<String>` | Exchange-specific trade ID (if available) |
+| `seq_id` | `Option<u64>` | Exchange-specific sequence ID (if available) |
+
+### `stream(config) -> Stream<Item = Result<MarketDataItem, IngestError>>`
+
+The main entry point. Returns a stream of market data results.
+
+- **First `LobItem`**: Always a full snapshot (if `data_kind` includes `LOB`)
+- **Subsequent `LobItem`**: Incremental updates (post-filtered by `max_level`/`max_level_pct`)
+- **Stream ends**: On fatal error (max reconnect attempts exceeded) or when the stream is dropped
+- **Errors**: Wrapped in `IngestError` (config, connection, parse, etc.)
+
+## Usage Examples
+
+### 1. Subscribe to LOB only (OKX)
+
+```rust
+let config = DataSourceConfig {
+    exchange: "okx".into(),
+    instrument: "BTC-USDT".into(),
+    data_kind: DataKind::LOB,
+    ..Default::default()
+};
+```
+
+### 2. Subscribe to trades only (Kraken)
+
+```rust
+let config = DataSourceConfig {
+    exchange: "kraken".into(),
+    instrument: "XBT/USD".into(),
+    data_kind: DataKind::TRADE,
+    ..Default::default()
+};
+```
+
+### 3. Subscribe to both LOB and trades (Bitstamp)
+
+```rust
+let config = DataSourceConfig {
+    exchange: "bitstamp".into(),
+    instrument: "BTC/USD".into(),
+    data_kind: DataKind::LOB | DataKind::TRADE,
+    ..Default::default()
+};
+```
+
+### 4. Apply LOB pre-filtering (top 20 levels)
+
+```rust
+let config = DataSourceConfig {
+    exchange: "okx".into(),
+    instrument: "ETH-USDT".into(),
+    data_kind: DataKind::LOB,
+    max_level: Some(20),
+    ..Default::default()
+};
+```
+
+### 5. Apply LOB pre-filtering (±0.5% from best price)
+
+```rust
+let config = DataSourceConfig {
+    exchange: "kraken".into(),
+    instrument: "XBT/USD".into(),
+    data_kind: DataKind::LOB,
+    max_level_pct: 0.5,
+    ..Default::default()
+};
+```
+
+### 6. Custom resilience (fast retry, no jitter)
+
+```rust
+let config = DataSourceConfig {
+    exchange: "okx".into(),
+    instrument: "BTC-USDT".into(),
+    data_kind: DataKind::LOB,
+    resilience: ResilienceConfig {
+        initial_backoff_ms: 100,
+        max_backoff_ms: 5000,
+        backoff_multiplier: 1.5,
+        jitter_ms: 0,
+        ..Default::default()
+    },
+    ..Default::default()
+};
+```
+
+### 7. Disable heartbeat (default is disabled)
+
+```rust
+let config = DataSourceConfig {
+    exchange: "kraken".into(),
+    instrument: "XBT/USD".into(),
+    data_kind: DataKind::LOB,
+    resilience: ResilienceConfig {
+        heartbeat_interval_secs: None, // explicit
+        ..Default::default()
+    },
+    ..Default::default()
+};
+```
+
+### 8. Limit reconnection attempts
+
+```rust
+let config = DataSourceConfig {
+    exchange: "bitstamp".into(),
+    instrument: "ETH/USD".into(),
+    data_kind: DataKind::LOB,
+    resilience: ResilienceConfig {
+        max_attempts: Some(5), // give up after 5 attempts
+        ..Default::default()
+    },
+    ..Default::default()
+};
+```
+
+## Running the Demo Binary
+
+The library includes a demo binary that connects to an exchange and prints JSON messages.
+
+### Build and run via Cargo
+
+```bash
+cargo run --release --bin cryptomeria-ingest-demo -- okx BTC-USDT both
+```
+
+### Install locally (makes `cryptomeria-ingest-demo` available in `~/.cargo/bin`)
+
+```bash
+cargo install --path rs/ingest
+# Then run:
+cryptomeria-ingest-demo kraken XBT/USD lob
+```
+
+## Design Notes
+
+### Exchange Adapters
+
+Each exchange adapter (`okx::ws::OkxAdapter`, `kraken::ws::KrakenAdapter`, `bitstamp::ws::BitstampAdapter`) implements the `ExchangeAdapter` trait, which defines:
+
+- `instrument()`: the instrument symbol
+- `url()`: WebSocket URL for the region/exchange
+- `subscribe_msgs()`: messages to send on connection
+- `resubscribe_msgs()`: messages to send on reconnection (usually same as subscribe)
+- `parse_message(&self, text: &str) -> Result<Self::Message, String>`: parse raw WebSocket text
+- `handle_message(&mut self, msg: &Self::Message) -> Option<MarketDataItem>`: process a parsed message, update internal state, return an item to emit
+- `handle_heartbeat(&self, msg: &Self::Message) -> bool`: whether to respond to this message as a heartbeat
+- `async on_reconnect(&self) -> Result<Vec<MarketDataItem>, String>`: optional async hook to fetch snapshot on reconnect (used by Bitstamp)
+
+### WebSocket Loop (`wsloop::run_exchange_stream`)
+
+The shared logic that handles:
+
+- Connection with exponential backoff and jitter
+- Sending subscription messages
+- Reading WebSocket messages
+- Dispatching to the adapter's `handle_message`
+- Emitting items via a bounded `mpsc::channel` (capacity 1024)
+- Detecting receiver drop (client lost interest) and shutting down the task
+- Optional reconnect snapshot fetching (e.g., Bitstamp REST order book)
+- No signal handling — that's the responsibility of the binary (SIGINT/SIGTERM should drop the stream)
+
+### Stream Lifecycle
+
+1. `stream(config)` validates the config and launches the exchange adapter task.
+2. The task connects, subscribes, and begins reading messages.
+3. Each parsed message is passed to `adapter.handle_message`, which may return a `MarketDataItem`.
+4. Items are sent via an `mpsc::Sender` to the receiver half of the stream.
+5. The stream yields `Result<MarketDataItem, IngestError>`.
+6. If the receiver is dropped (e.g., the stream goes out of scope), the sender sends `Err`, the task detects this, and exits cleanly.
+7. On fatal errors (max reconnect attempts exceeded), the stream yields an `Err` and ends.
+8. The first `LobItem` in the stream (if `data_kind` includes `LOB`) is always a full snapshot.
+
+### Testing
+
+Run the library tests:
+
+```bash
+cargo test
+```
+
+Run lint:
+
+```bash
+cargo clippy --all-targets -- -D warnings
+```
+
+## License
+
+Apache-2.0 © 2026 Fibonsai

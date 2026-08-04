@@ -1,0 +1,45 @@
+[package]
+name = "cryptomeria-ingest"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Multi-exchange crypto market data ingestion library (OKX, Kraken, Bitstamp) — connects to exchange WS and returns a stream of normalized LOB/trade data"
+repository = "https://github.com/fibonsai/cryptomeria"
+keywords = ["crypto", "market-data", "websocket", "order-book", "trades"]
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ordered-float = "4"
+rand = "0.8"
+log = "0.4"
+rasant = "1.1"
+chrono = "0.4"
+reqwest = { version = "0.13.4", features = ["json"] }
+fastrand = "2.0"
+
+[dev-dependencies]
+serde_test = "1"
+serial_test = "2.0"
+
+[[bin]]
+name = "cryptomeria-ingest-demo"
+path = "src/bin/demo.rs"
+
+[[test]]
+name = "okx_integration"
+path = "tests/okx_integration.rs"
+harness = true
+
+[[test]]
+name = "kraken_integration"
+path = "tests/kraken_integration.rs"
+harness = true
+
+[[test]]
+name = "bitstamp_integration"
+path = "tests/bitstamp_integration.rs"
+harness = true

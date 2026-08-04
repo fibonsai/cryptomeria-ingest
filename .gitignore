@@ -1,0 +1,53 @@
+# Rust
+/target
+**/*.rs.bk
+Cargo.lock
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+.venv/**/*
+.pdm/
+.pdm/**/*
+uv.lock
+.pytest_cache/
+.pytest_cache/**/*
+.ruff_cache/
+.ruff_cache/**/*
+*.egg-info/
+*.egg-info/**/*
+dist/
+dist/**/*
+build/
+build/**/*
+
+# Data files
+data/
+data/**/*
+*.parquet
+*.svg
+
+# Environment
+.env.local
+.env.local.**/*
+
+# IDE
+.vscode/
+.vscode/**/*
+.idea/
+.idea/**/*
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+graphify-out/**
+.testcontainers.properties
+
+# NEver commit temp plan file
+docs/PLAN.md
