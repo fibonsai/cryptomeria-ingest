@@ -1,0 +1,19 @@
+name: Rust Tests and Lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: ['**']
+
+jobs:
+  rust-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rs
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup update stable && rustup component add clippy
+      - run: cargo clippy -- -D warnings
+      - run: cargo test
