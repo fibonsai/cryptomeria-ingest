@@ -20,7 +20,6 @@ help:
 	@echo "  coverage      Run tests with coverage via cargo-tarpaulin"
 	@echo "  coverage-report   Serve the coverage HTML report"
 	@echo "  audit         Run cargo audit (fails on vulnerabilities)"
-	@echo "  check-audit   Run cargo audit (alias for audit)"
 
 # =============================================================================
 # targets
