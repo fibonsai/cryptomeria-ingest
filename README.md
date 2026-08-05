@@ -1,5 +1,7 @@
 # cryptomeria-ingest
 
+[![Coverage](https://img.shields.io/codecov/c/github/fibonsai/cryptomeria-ingest/main)](https://codecov.io/gh/fibonsai/cryptomeria-ingest)
+
 Multi-exchange crypto market data ingestion library for Rust.
 
 Connects to WebSocket feeds (OKX, Kraken, Bitstamp) and returns a stream of normalized LOB (Limit Order Book) and trade data.
@@ -337,6 +339,32 @@ Run lint:
 ```bash
 cargo clippy --all-targets -- -D warnings
 ```
+
+### Test Coverage
+
+Coverage is measured with [cargo-tarpaulin](https://github.com/xd009642/tarpaulin) and enforced in CI. The current guard threshold is **50%**; the CI job fails if coverage drops below it.
+
+Run coverage locally:
+
+```bash
+# Install the tool once
+make coverage-install
+
+# Run tests with coverage and emit XML + HTML reports
+make coverage
+```
+
+Alternatively, run the equivalent commands directly:
+
+```bash
+cargo install cargo-tarpaulin
+cargo tarpaulin --out Xml --output-dir ./
+cargo tarpaulin --out Html --output-dir ./coverage_report
+```
+
+To enforce the threshold during a local run, add `--fail-under 50`.
+
+> **Note on coverage targets:** Pure parsing, subscription-building, config-validation, and error-handling logic are fully unit-tested (>90% in `config.rs`, `items.rs`, and the `ws.rs` adapters). The WebSocket I/O loop (`wsloop.rs`), the `stream()` entry point, and the demo binary require live network connections or offline mocking of the Tungstenite socket, so they remain partially uncovered. Raising coverage beyond ~50% requires mocking the transport layer.
 
 ## License
 

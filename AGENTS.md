@@ -14,6 +14,9 @@ Multi-exchange crypto market data ingestion library (OKX, Kraken, Bitstamp) that
 - `make fmt` - Format code with rustfmt
 - `make install` - Install release binary
 - `make clean` - Remove build artifacts
+- `make coverage-install` - Install cargo-tarpaulin
+- `make coverage` - Run tests with coverage (XML + HTML reports)
+- `make coverage-report` - Serve HTML coverage report locally
 - `cargo run --bin cryptomeria-ingest-demo` - Run demo application
 
 ### Testing Details

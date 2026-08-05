@@ -1,7 +1,8 @@
 # Cryptomeria Makefile
 
 .PHONY: help \
-        build build-release test test-integration lint fmt clean install
+        build build-release test test-integration lint fmt clean install \
+        coverage coverage-install coverage-report
 
 # Default target
 help:
@@ -15,6 +16,9 @@ help:
 	@echo "  fmt           Format code (cargo fmt)"
 	@echo "  install       Install release"
 	@echo "  clean         Clean build artifacts (cargo clean)"
+	@echo "  coverage-install  Install cargo-tarpaulin for coverage"
+	@echo "  coverage      Run tests with coverage via cargo-tarpaulin"
+	@echo "  coverage-report   Serve the coverage HTML report"
 
 # =============================================================================
 # targets
@@ -43,3 +47,14 @@ clean:
 
 install:
 	cargo install
+
+coverage-install:
+	cargo install cargo-tarpaulin
+
+coverage:
+	cargo test --all-features --no-run
+	cargo tarpaulin --out Xml --output-dir ./
+	cargo tarpaulin --out Html --output-dir ./coverage_report
+
+coverage-report:
+	python -m http.server 8000 -d ./coverage_report

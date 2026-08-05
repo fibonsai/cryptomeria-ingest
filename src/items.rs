@@ -117,3 +117,75 @@ impl From<reqwest::Error> for IngestError {
         IngestError::Exchange(e.to_string())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_market_data_item_timestamp_lob() {
+        let item = MarketDataItem::Lob(LobItem {
+            ts: 123,
+            bids: vec![],
+            asks: vec![],
+        });
+        assert_eq!(item.timestamp_ms(), 123);
+    }
+
+    #[test]
+    fn test_market_data_item_timestamp_trade() {
+        let item = MarketDataItem::Trade(TradeItem {
+            ts: 456,
+            price: 100.0,
+            size: 1.0,
+            side: "buy".into(),
+            trade_id: None,
+            seq_id: None,
+        });
+        assert_eq!(item.timestamp_ms(), 456);
+    }
+
+    #[test]
+    fn test_ingest_error_display() {
+        assert_eq!(
+            IngestError::Config("x".into()).to_string(),
+            "config error: x"
+        );
+        assert_eq!(
+            IngestError::Connection("x".into()).to_string(),
+            "connection error: x"
+        );
+        assert_eq!(
+            IngestError::Subscribe("x".into()).to_string(),
+            "subscribe error: x"
+        );
+        assert_eq!(IngestError::Parse("x".into()).to_string(), "parse error: x");
+        assert_eq!(
+            IngestError::MaxReconnectsExceeded(3).to_string(),
+            "max reconnect attempts (3) exceeded"
+        );
+        assert_eq!(IngestError::ChannelClosed.to_string(), "channel closed");
+        assert_eq!(
+            IngestError::Heartbeat("x".into()).to_string(),
+            "heartbeat error: x"
+        );
+        assert_eq!(
+            IngestError::Exchange("x".into()).to_string(),
+            "exchange error: x"
+        );
+        assert_eq!(IngestError::Io("x".into()).to_string(), "I/O error: x");
+    }
+
+    #[test]
+    fn test_ingest_error_from_config_error() {
+        let err: IngestError = crate::config::ConfigError::MissingExchange.into();
+        assert_eq!(err.to_string(), "config error: exchange is required");
+    }
+
+    #[test]
+    fn test_ingest_error_from_serde_error() {
+        let serde_err = serde_json::from_str::<serde_json::Value>("not json").unwrap_err();
+        let err: IngestError = serde_err.into();
+        assert!(matches!(err, IngestError::Parse(_)));
+    }
+}

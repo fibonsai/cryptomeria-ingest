@@ -89,4 +89,55 @@ mod tests {
             Ok(_) => panic!("expected error"),
         }
     }
+
+    #[tokio::test]
+    async fn test_stream_validation_missing_region() {
+        let config = DataSourceConfig {
+            exchange: "okx".into(),
+            instrument: "BTC-USDT".into(),
+            data_kind: crate::config::DataKind::LOB,
+            ..Default::default()
+        };
+        match stream(config).await {
+            Err(IngestError::Config(msg)) if msg.contains("region is required") => {}
+            Err(e) => panic!("unexpected error: {e}"),
+            Ok(_) => panic!("expected error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_stream_validation_empty_data_kind() {
+        let config = DataSourceConfig {
+            exchange: "okx".into(),
+            region: "global".into(),
+            instrument: "BTC-USDT".into(),
+            data_kind: crate::config::DataKind::empty(),
+            ..Default::default()
+        };
+        match stream(config).await {
+            Err(IngestError::Config(msg))
+                if msg.contains("data_kind must include at least Lob or Trade") => {}
+            Err(e) => panic!("unexpected error: {e}"),
+            Ok(_) => panic!("expected error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_stream_validation_max_level_pct_conflict() {
+        let config = DataSourceConfig {
+            exchange: "okx".into(),
+            region: "global".into(),
+            instrument: "BTC-USDT".into(),
+            data_kind: crate::config::DataKind::LOB,
+            max_level: Some(10),
+            max_level_pct: 0.5,
+            ..Default::default()
+        };
+        match stream(config).await {
+            Err(IngestError::Config(msg))
+                if msg.contains("max_level and max_level_pct cannot both be set") => {}
+            Err(e) => panic!("unexpected error: {e}"),
+            Ok(_) => panic!("expected error"),
+        }
+    }
 }
