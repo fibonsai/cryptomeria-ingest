@@ -366,6 +366,30 @@ To enforce the threshold during a local run, add `--fail-under 50`.
 
 > **Note on coverage targets:** Pure parsing, subscription-building, config-validation, and error-handling logic are fully unit-tested (>90% in `config.rs`, `items.rs`, and the `ws.rs` adapters). The WebSocket I/O loop (`wsloop.rs`), the `stream()` entry point, and the demo binary require live network connections or offline mocking of the Tungstenite socket, so they remain partially uncovered. Raising coverage beyond ~50% requires mocking the transport layer.
 
+## Dependency Security Audit
+
+Dependency vulnerabilities are checked with [cargo-audit](https://github.com/RustSec/cargo-audit). CI runs it on every push and pull request and fails the build if any vulnerabilities are reported.
+
+Install the tool once:
+
+```bash
+cargo install cargo-audit
+```
+
+Run it locally with Cargo:
+
+```bash
+cargo audit
+```
+
+Or via the `Makefile` target:
+
+```bash
+make audit
+```
+
+The `Makefile` `audit` target and the `[script]` entry run `cargo audit` and exit non-zero when a vulnerability is found, so the audit "fails closed".
+
 ## License
 
 Apache-2.0 © 2026 Fibonsai

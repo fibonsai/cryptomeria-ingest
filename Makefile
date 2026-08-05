@@ -2,7 +2,7 @@
 
 .PHONY: help \
         build build-release test test-integration lint fmt clean install \
-        coverage coverage-install coverage-report
+        coverage coverage-install coverage-report audit check-audit
 
 # Default target
 help:
@@ -19,6 +19,8 @@ help:
 	@echo "  coverage-install  Install cargo-tarpaulin for coverage"
 	@echo "  coverage      Run tests with coverage via cargo-tarpaulin"
 	@echo "  coverage-report   Serve the coverage HTML report"
+	@echo "  audit         Run cargo audit (fails on vulnerabilities)"
+	@echo "  check-audit   Run cargo audit (alias for audit)"
 
 # =============================================================================
 # targets
@@ -58,3 +60,9 @@ coverage:
 
 coverage-report:
 	python -m http.server 8000 -d ./coverage_report
+
+audit:
+	cargo audit
+
+check-audit:
+	cargo audit
