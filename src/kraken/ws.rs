@@ -30,6 +30,7 @@ pub struct KrakenAdapter {
     pub max_level: Option<usize>,
     pub snapshot_depth: usize,
     lob_filter: Option<LobFilter>,
+    order_book: OrderBook,
 }
 
 impl KrakenAdapter {
@@ -54,6 +55,7 @@ impl KrakenAdapter {
             max_level,
             snapshot_depth,
             lob_filter,
+            order_book: OrderBook::new(),
         }
     }
 
@@ -101,9 +103,8 @@ impl ExchangeAdapter for KrakenAdapter {
     }
 
     fn handle_message(
-        &self,
+        &mut self,
         msg: &Self::Message,
-        book: &mut OrderBook,
     ) -> Option<MarketDataItem> {
         match msg.message_type() {
             MessageType::L2Snapshot | MessageType::L2Update | MessageType::L2 => {
@@ -113,8 +114,10 @@ impl ExchangeAdapter for KrakenAdapter {
                         .unwrap_or_default()
                         .as_millis() as u64
                 });
+
+                let mut book = OrderBook::new();
                 book.process_msg(msg, self.lob_filter.as_ref());
-                Some(self.normalize_lob(book, ts))
+                Some(self.normalize_lob(&book, ts))
             }
             MessageType::Trade => {
                 if let Some(trade_raw) = msg

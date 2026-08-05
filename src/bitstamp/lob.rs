@@ -1,7 +1,6 @@
 use crate::bitstamp::types::{BitstampWsMessage, OrderEntry, OrderBookData, TradeData, MessageType};
-use crate::traits::{LevelVec, LevelsWithinPct, LobFilter, OrderBook as OrderBookTrait};
+use crate::traits::{LevelsWithinPct, LobFilter, OrderBook as OrderBookTrait};
 use ordered_float::OrderedFloat;
-use serde_json::Value;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap};
 
