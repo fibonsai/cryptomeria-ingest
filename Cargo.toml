@@ -44,3 +44,6 @@ harness = true
 name = "bitstamp_integration"
 path = "tests/bitstamp_integration.rs"
 harness = true
+
+[script]
+audit = "cargo audit"

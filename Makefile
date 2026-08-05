@@ -1,7 +1,7 @@
 # Cryptomeria Makefile
 
 .PHONY: help \
-        build build-release test test-integration lint fmt clean install \
+        build build-release test test-integration lint fmt clean install audit \
         coverage coverage-install coverage-report
 
 # Default target
@@ -58,3 +58,6 @@ coverage:
 
 coverage-report:
 	python -m http.server 8000 -d ./coverage_report
+
+audit:
+	cargo audit
