@@ -21,6 +21,8 @@ chrono = "0.4"
 reqwest = { version = "0.13.4", features = ["json"] }
 fastrand = "2.0"
 
+clap = { version = "4", features = ["derive"] }
+
 [dev-dependencies]
 serde_test = "1"
 serial_test = "2.0"

@@ -275,16 +275,29 @@ The library includes a demo binary that connects to an exchange and prints JSON 
 
 ### Build and run via Cargo
 
+The demo CLI uses [Clap](https://github.com/clap-rs/clap) and exposes every configuration parameter as a `--flag`. Run `--help` to see all options.
+
 ```bash
-cargo run --release --bin cryptomeria-ingest-demo -- okx BTC-USDT both
+cargo run --release --bin cryptomeria-ingest-demo -- \
+  --exchange okx \
+  --region global \
+  --instrument BTC-USDT \
+  --data-kind both \
+  --max-level 5 \
+  --max-level-pct 0.0 \
+  --snapshot-depth 400
 ```
 
 ### Install locally (makes `cryptomeria-ingest-demo` available in `~/.cargo/bin`)
 
 ```bash
 cargo install
-# Then run:
-cryptomeria-ingest-demo kraken XBT/USD lob
+# Then run (all parameters as flags):
+cryptomeria-ingest-demo \
+  --exchange kraken \
+  --region global \
+  --instrument XBT/USD \
+  --data-kind lob
 ```
 
 ## Design Notes
