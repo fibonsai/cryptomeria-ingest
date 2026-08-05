@@ -18,6 +18,8 @@ help:
 	@echo "  clean         Clean build artifacts (cargo clean)"
 	@echo "  coverage-install  Install cargo-tarpaulin for coverage"
 	@echo "  coverage      Run tests with coverage via cargo-tarpaulin"
+	@echo "  coverage-report   Serve the coverage HTML report"
+
 
 # =============================================================================
 # targets
