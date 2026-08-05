@@ -280,7 +280,7 @@ cargo run --release --bin cryptomeria-ingest-demo -- okx BTC-USDT both
 ### Install locally (makes `cryptomeria-ingest-demo` available in `~/.cargo/bin`)
 
 ```bash
-cargo install --path rs/ingest
+cargo install
 # Then run:
 cryptomeria-ingest-demo kraken XBT/USD lob
 ```
