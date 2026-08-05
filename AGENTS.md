@@ -25,6 +25,8 @@ Multi-exchange crypto market data ingestion library (OKX, Kraken, Bitstamp) that
 - Integration tests: See tests/okx_integration.rs, tests/kraken_integration.rs, tests/bitstamp_integration.rs
 - Run specific integration test: `cargo test --test okx_integration`
 
+**ALWAYS load 'rust-tdd' skill before create or update tests.**
+
 ## Project Structure
 - `src/lib.rs` - Main library exports
 - `src/bin/demo.rs` - Example usage
@@ -136,3 +138,22 @@ grepai refs writers "uid" --json
 4. Use `Read` tool to examine files from results
 5. Only use Grep for exact string searches if needed
 
+## Skill Activation
+
+### Always load when start new session
+
+- ALWAYS load `verification-before-completion` skill when init a new session.
+
+### When user, agent or system request an action
+
+- **"add a task"** or **"create an issue for X"** → load the `add-task` skill first.
+- **"create a plan"** or **"plan this issue"** → load the `create-plan` skill first.
+- **"execute the plan"**, **"work on the issue"**, or **"run the plan"** → load the `execute-plan` skill first.
+- **"commit"** or **"make a commit"** → load the `git-commit` skill first.
+- **"watch files"** or **"start a worktree"** → load the `using-git-worktrees` skill first.
+
+The skill must be loaded before any related actions are taken; the skill's instructions define the exact workflow (e.g., load‑plan → read issue → write docs/PLAN.md → post comment). Loading a skill does not perform work itself; it merely injects the skill's instructions into the current conversation.
+
+### When work in Rust project
+
+- Load both `rust-coding` and `rust-tdd` skills first.
