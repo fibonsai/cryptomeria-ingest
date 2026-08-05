@@ -2,7 +2,7 @@
 
 .PHONY: help \
         build build-release test test-integration lint fmt clean install \
-        coverage coverage-install coverage-report audit check-audit
+        coverage coverage-install coverage-report audit
 
 # Default target
 help:
@@ -62,7 +62,4 @@ coverage-report:
 	python -m http.server 8000 -d ./coverage_report
 
 audit:
-	cargo audit
-
-check-audit:
 	cargo audit
