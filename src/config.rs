@@ -195,3 +195,230 @@ impl Default for DataSourceConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_data_kind_bits() {
+        assert_eq!(DataKind::LOB.bits(), 1);
+        assert_eq!(DataKind::TRADE.bits(), 2);
+    }
+
+    #[test]
+    fn test_data_kind_contains() {
+        let both = DataKind::LOB | DataKind::TRADE;
+        assert!(both.contains(DataKind::LOB));
+        assert!(both.contains(DataKind::TRADE));
+        assert!(!DataKind::LOB.contains(DataKind::TRADE));
+    }
+
+    #[test]
+    fn test_data_kind_insert_remove() {
+        let mut k = DataKind::empty();
+        k.insert(DataKind::LOB);
+        assert!(k.contains(DataKind::LOB));
+        k.remove(DataKind::LOB);
+        assert!(!k.contains(DataKind::LOB));
+    }
+
+    #[test]
+    fn test_data_kind_is_empty() {
+        assert!(DataKind::empty().is_empty());
+        assert!(!DataKind::LOB.is_empty());
+    }
+
+    #[test]
+    fn test_data_kind_display() {
+        assert_eq!(DataKind::empty().to_string(), "");
+        assert_eq!(DataKind::LOB.to_string(), "Lob");
+        assert_eq!(DataKind::TRADE.to_string(), "Trade");
+        assert_eq!((DataKind::LOB | DataKind::TRADE).to_string(), "Lob|Trade");
+    }
+
+    #[test]
+    fn test_data_kind_bitor() {
+        let k = DataKind::LOB | DataKind::TRADE;
+        assert!(k.contains(DataKind::LOB));
+        assert!(k.contains(DataKind::TRADE));
+    }
+
+    #[test]
+    fn test_resilience_config_default() {
+        let cfg = ResilienceConfig::default();
+        assert_eq!(cfg.initial_backoff_ms, 1000);
+        assert_eq!(cfg.max_backoff_ms, 60_000);
+        assert_eq!(cfg.backoff_multiplier, 2.0);
+        assert_eq!(cfg.jitter_ms, 1000);
+        assert_eq!(cfg.heartbeat_interval_secs, None);
+        assert_eq!(cfg.max_attempts, None);
+    }
+
+    #[test]
+    fn test_data_source_config_validate_ok() {
+        let cfg = DataSourceConfig {
+            exchange: "okx".into(),
+            region: "global".into(),
+            instrument: "BTC-USDT".into(),
+            data_kind: DataKind::LOB,
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_data_source_config_validate_missing_exchange() {
+        let cfg = DataSourceConfig {
+            region: "global".into(),
+            instrument: "BTC-USDT".into(),
+            data_kind: DataKind::LOB,
+            ..Default::default()
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(matches!(err, ConfigError::MissingExchange));
+    }
+
+    #[test]
+    fn test_data_source_config_validate_unknown_exchange() {
+        let cfg = DataSourceConfig {
+            exchange: "binance".into(),
+            region: "global".into(),
+            instrument: "BTC-USDT".into(),
+            data_kind: DataKind::LOB,
+            ..Default::default()
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(matches!(err, ConfigError::UnknownExchange(e) if e == "binance"));
+    }
+
+    #[test]
+    fn test_data_source_config_validate_missing_region() {
+        let cfg = DataSourceConfig {
+            exchange: "okx".into(),
+            instrument: "BTC-USDT".into(),
+            data_kind: DataKind::LOB,
+            ..Default::default()
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(matches!(err, ConfigError::MissingRegion));
+    }
+
+    #[test]
+    fn test_data_source_config_validate_unknown_region() {
+        let cfg = DataSourceConfig {
+            exchange: "okx".into(),
+            region: "asia".into(),
+            instrument: "BTC-USDT".into(),
+            data_kind: DataKind::LOB,
+            ..Default::default()
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(matches!(err, ConfigError::UnknownRegion(r) if r == "asia"));
+    }
+
+    #[test]
+    fn test_data_source_config_validate_missing_instrument() {
+        let cfg = DataSourceConfig {
+            exchange: "okx".into(),
+            region: "global".into(),
+            data_kind: DataKind::LOB,
+            ..Default::default()
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(matches!(err, ConfigError::MissingInstrument));
+    }
+
+    #[test]
+    fn test_data_source_config_validate_empty_data_kind() {
+        let cfg = DataSourceConfig {
+            exchange: "okx".into(),
+            region: "global".into(),
+            instrument: "BTC-USDT".into(),
+            data_kind: DataKind::empty(),
+            ..Default::default()
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(matches!(err, ConfigError::EmptyDataKind));
+    }
+
+    #[test]
+    fn test_data_source_config_validate_max_level_and_pct_conflict() {
+        let cfg = DataSourceConfig {
+            exchange: "okx".into(),
+            region: "global".into(),
+            instrument: "BTC-USDT".into(),
+            data_kind: DataKind::LOB,
+            max_level: Some(10),
+            max_level_pct: 0.5,
+            ..Default::default()
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(matches!(err, ConfigError::MaxLevelAndPctConflict));
+    }
+
+    #[test]
+    fn test_data_source_config_validate_max_level_without_lob() {
+        let cfg = DataSourceConfig {
+            exchange: "okx".into(),
+            region: "global".into(),
+            instrument: "BTC-USDT".into(),
+            data_kind: DataKind::TRADE,
+            max_level: Some(10),
+            ..Default::default()
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(matches!(err, ConfigError::MaxLevelWithoutLob));
+    }
+
+    #[test]
+    fn test_data_source_config_validate_invalid_snapshot_depth() {
+        let cfg = DataSourceConfig {
+            exchange: "okx".into(),
+            region: "global".into(),
+            instrument: "BTC-USDT".into(),
+            data_kind: DataKind::LOB,
+            snapshot_depth: 0,
+            ..Default::default()
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidSnapshotDepth));
+    }
+
+    #[test]
+    fn test_config_error_display() {
+        assert_eq!(
+            ConfigError::MissingExchange.to_string(),
+            "exchange is required"
+        );
+        assert_eq!(
+            ConfigError::UnknownExchange("x".into()).to_string(),
+            "unknown exchange: x"
+        );
+        assert_eq!(ConfigError::MissingRegion.to_string(), "region is required");
+        assert_eq!(
+            ConfigError::UnknownRegion("x".into()).to_string(),
+            "unknown region: x"
+        );
+        assert_eq!(
+            ConfigError::MissingInstrument.to_string(),
+            "instrument is required"
+        );
+        assert_eq!(
+            ConfigError::EmptyDataKind.to_string(),
+            "data_kind must include at least Lob or Trade"
+        );
+        assert_eq!(
+            ConfigError::MaxLevelAndPctConflict.to_string(),
+            "max_level and max_level_pct cannot both be set"
+        );
+        assert_eq!(
+            ConfigError::MaxLevelWithoutLob.to_string(),
+            "max_level requires data_kind to include Lob"
+        );
+        assert_eq!(
+            ConfigError::InvalidSnapshotDepth.to_string(),
+            "snapshot_depth must be > 0"
+        );
+    }
+}

@@ -162,3 +162,100 @@ impl ExchangeAdapter for OkxAdapter {
         crate::urls::websocket_url(&self.region, "okx").to_string()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn adapter() -> OkxAdapter {
+        OkxAdapter::new("BTC-USDT".into(), "global".into(), 0.0, None, 400)
+    }
+
+    #[test]
+    fn test_build_subscribe_msg() {
+        let msg = build_subscribe_msg("books", "BTC-USDT");
+        let v: serde_json::Value = serde_json::from_str(&msg).unwrap();
+        assert_eq!(v["op"], "subscribe");
+        assert_eq!(v["args"][0]["channel"], "books");
+        assert_eq!(v["args"][0]["instId"], "BTC-USDT");
+    }
+
+    #[test]
+    fn test_subscribe_msgs() {
+        let a = adapter();
+        let msgs = a.subscribe_msgs();
+        assert_eq!(msgs.len(), 2);
+        assert!(msgs[0].contains("\"books\""));
+        assert!(msgs[1].contains("\"trades\""));
+    }
+
+    #[test]
+    fn test_instrument_and_url() {
+        let a = adapter();
+        assert_eq!(a.instrument(), "BTC-USDT");
+        assert!(!a.url().is_empty());
+    }
+
+    #[test]
+    fn test_handle_heartbeat_event_true() {
+        let a = adapter();
+        let msg: OkxWsMessage = serde_json::from_str(
+            r#"{"event":"subscribe","arg":{"channel":"books","instId":"BTC-USDT"}}"#,
+        )
+        .unwrap();
+        assert!(a.handle_heartbeat(&msg));
+    }
+
+    #[test]
+    fn test_handle_heartbeat_trade_false() {
+        let a = adapter();
+        let msg: OkxWsMessage = serde_json::from_str(
+            r#"{"arg":{"channel":"trades","instId":"BTC-USDT"},"data":[{"px":"100","sz":"1","side":"buy","tradeId":"1","ts":"1700000000000"}]}"#,
+        )
+        .unwrap();
+        assert!(!a.handle_heartbeat(&msg));
+    }
+
+    #[test]
+    fn test_handle_message_trade() {
+        let mut a = adapter();
+        let msg: OkxWsMessage = serde_json::from_str(
+            r#"{"arg":{"channel":"trades","instId":"BTC-USDT"},"data":[{"px":"100.5","sz":"2.5","side":"buy","tradeId":"t1","ts":"1700000000000"}]}"#,
+        )
+        .unwrap();
+        let item = a.handle_message(&msg).expect("expected a trade item");
+        match item {
+            MarketDataItem::Trade(t) => {
+                assert_eq!(t.price, 100.5);
+                assert_eq!(t.size, 2.5);
+                assert_eq!(t.side, "buy");
+                assert_eq!(t.trade_id.as_deref(), Some("t1"));
+            }
+            _ => panic!("expected Trade item"),
+        }
+    }
+
+    #[test]
+    fn test_handle_message_trade_parse_failure_returns_none() {
+        let mut a = adapter();
+        let msg: OkxWsMessage =
+            serde_json::from_str(r#"{"arg":{"channel":"trades","instId":"BTC-USDT"},"data":[]}"#)
+                .unwrap();
+        assert!(a.handle_message(&msg).is_none());
+    }
+
+    #[test]
+    fn test_handle_message_event_returns_none() {
+        let mut a = adapter();
+        let msg: OkxWsMessage = serde_json::from_str(r#"{"event":"subscribe"}"#).unwrap();
+        assert!(a.handle_message(&msg).is_none());
+    }
+
+    #[test]
+    fn test_handle_message_unknown_returns_none() {
+        let mut a = adapter();
+        let msg: OkxWsMessage =
+            serde_json::from_str(r#"{"arg":{"channel":"nonsense","instId":"BTC-USDT"}}"#).unwrap();
+        assert!(a.handle_message(&msg).is_none());
+    }
+}

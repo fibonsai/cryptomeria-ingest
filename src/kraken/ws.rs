@@ -159,3 +159,94 @@ impl ExchangeAdapter for KrakenAdapter {
         crate::urls::websocket_url(&self.region, "kraken").to_string()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn adapter() -> KrakenAdapter {
+        KrakenAdapter::new("XBT/USD".into(), "global".into(), 0.0, None, 400)
+    }
+
+    #[test]
+    fn test_build_subscribe_msg() {
+        let msg = build_subscribe_msg("book", "BTC/USD");
+        let v: serde_json::Value = serde_json::from_str(&msg).unwrap();
+        assert_eq!(v["method"], "subscribe");
+        assert_eq!(v["params"]["channel"], "book");
+        assert_eq!(v["params"]["symbol"][0], "BTC/USD");
+    }
+
+    #[test]
+    fn test_subscribe_msgs() {
+        let a = adapter();
+        let msgs = a.subscribe_msgs();
+        assert_eq!(msgs.len(), 2);
+        assert!(msgs[0].contains("\"book\""));
+        assert!(msgs[1].contains("\"trade\""));
+    }
+
+    #[test]
+    fn test_handle_heartbeat() {
+        let a = adapter();
+        let msg: KrakenWsMessage = serde_json::from_str(r#"{"channel":"heartbeat"}"#).unwrap();
+        assert!(a.handle_heartbeat(&msg));
+    }
+
+    #[test]
+    fn test_handle_heartbeat_event() {
+        let a = adapter();
+        let msg: KrakenWsMessage = serde_json::from_str(r#"{"method":"ping"}"#).unwrap();
+        assert!(a.handle_heartbeat(&msg));
+    }
+
+    #[test]
+    fn test_handle_heartbeat_trade_false() {
+        let a = adapter();
+        let msg: KrakenWsMessage = serde_json::from_str(
+            r#"{"channel":"trade","data":[{"symbol":"BTC/USD","price":100.0,"qty":1.0,"side":"buy","trade_id":1,"timestamp":0}]}"#,
+        )
+        .unwrap();
+        assert!(!a.handle_heartbeat(&msg));
+    }
+
+    #[test]
+    fn test_handle_message_trade() {
+        let mut a = adapter();
+        let msg: KrakenWsMessage = serde_json::from_str(
+            r#"{"channel":"trade","data":[{"symbol":"BTC/USD","price":99.5,"qty":3.0,"side":"sell","trade_id":42,"timestamp":"0"}]}"#,
+        )
+        .unwrap();
+        let item = a.handle_message(&msg).expect("expected trade item");
+        match item {
+            MarketDataItem::Trade(t) => {
+                assert_eq!(t.price, 99.5);
+                assert_eq!(t.size, 3.0);
+                assert_eq!(t.side, "sell");
+                assert_eq!(t.trade_id.as_deref(), Some("42"));
+            }
+            _ => panic!("expected Trade item"),
+        }
+    }
+
+    #[test]
+    fn test_handle_message_trade_parse_failure_returns_none() {
+        let mut a = adapter();
+        let msg: KrakenWsMessage =
+            serde_json::from_str(r#"{"channel":"trade","data":[]}"#).unwrap();
+        assert!(a.handle_message(&msg).is_none());
+    }
+
+    #[test]
+    fn test_handle_message_heartbeat_status_event_unknown_return_none() {
+        let mut a = adapter();
+        let hb: KrakenWsMessage = serde_json::from_str(r#"{"channel":"heartbeat"}"#).unwrap();
+        let st: KrakenWsMessage = serde_json::from_str(r#"{"channel":"status"}"#).unwrap();
+        let ev: KrakenWsMessage = serde_json::from_str(r#"{"method":"ping"}"#).unwrap();
+        let un: KrakenWsMessage = serde_json::from_str(r#"{"channel":"nonsense"}"#).unwrap();
+        assert!(a.handle_message(&hb).is_none());
+        assert!(a.handle_message(&st).is_none());
+        assert!(a.handle_message(&ev).is_none());
+        assert!(a.handle_message(&un).is_none());
+    }
+}

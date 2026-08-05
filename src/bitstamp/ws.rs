@@ -211,3 +211,109 @@ impl ExchangeAdapter for BitstampAdapter {
         self.fetch_snapshot().await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn adapter() -> BitstampAdapter {
+        BitstampAdapter::new(
+            "BTC/USD".into(),
+            "bitstamp".into(),
+            "global".into(),
+            "BTC/USD".into(),
+            0.0,
+            None,
+            400,
+        )
+    }
+
+    #[test]
+    fn test_build_subscribe_msg() {
+        let msg = build_subscribe_msg("live_trades_btcusd");
+        let v: serde_json::Value = serde_json::from_str(&msg).unwrap();
+        assert_eq!(v["event"], "bts:subscribe");
+        assert_eq!(v["data"]["channel"], "live_trades_btcusd");
+    }
+
+    #[test]
+    fn test_subscribe_msgs() {
+        let a = adapter();
+        let msgs = a.subscribe_msgs();
+        assert_eq!(msgs.len(), 2);
+        assert!(msgs[0].contains("diff_order_book_btcusd"));
+        assert!(msgs[1].contains("live_trades_btcusd"));
+    }
+
+    #[test]
+    fn test_handle_heartbeat_false() {
+        let a = adapter();
+        let msg: BitstampWsMessage = BitstampWsMessage::from_json(
+            r#"{"event":"bts:subscription_succeeded","channel":"live_trades_btcusd"}"#,
+        )
+        .unwrap();
+        assert!(!a.handle_heartbeat(&msg));
+    }
+
+    #[test]
+    fn test_handle_message_trade() {
+        let mut a = adapter();
+        let msg: BitstampWsMessage = BitstampWsMessage::from_json(
+            r#"{"event":"live_trades","channel":"live_trades_btcusd","data":{"id":5,"price":"101.0","amount":"2.5","type":0,"timestamp":"1700000000","microtimestamp":"1700000000000000"}}"#,
+        )
+        .unwrap();
+        let item = a.handle_message(&msg).expect("expected trade item");
+        match item {
+            MarketDataItem::Trade(t) => {
+                assert_eq!(t.price, 101.0);
+                assert_eq!(t.size, 2.5);
+                assert_eq!(t.side, "buy");
+                assert_eq!(t.trade_id.as_deref(), Some("5"));
+            }
+            _ => panic!("expected Trade item"),
+        }
+    }
+
+    #[test]
+    fn test_handle_message_trade_sell() {
+        let mut a = adapter();
+        let msg: BitstampWsMessage = BitstampWsMessage::from_json(
+            r#"{"event":"trade","channel":"live_trades_btcusd","data":{"id":6,"price":"98.0","amount":"1.0","type":1,"timestamp":"1700000000","microtimestamp":"1700000000000000"}}"#,
+        )
+        .unwrap();
+        let item = a.handle_message(&msg).expect("expected trade item");
+        match item {
+            MarketDataItem::Trade(t) => assert_eq!(t.side, "sell"),
+            _ => panic!("expected Trade item"),
+        }
+    }
+
+    #[test]
+    fn test_handle_message_trade_parse_failure_returns_none() {
+        let mut a = adapter();
+        let msg: BitstampWsMessage = BitstampWsMessage::from_json(
+            r#"{"event":"trade","channel":"live_trades_btcusd","data":null}"#,
+        )
+        .unwrap();
+        assert!(a.handle_message(&msg).is_none());
+    }
+
+    #[test]
+    fn test_handle_message_event_returns_none() {
+        let mut a = adapter();
+        let msg: BitstampWsMessage = BitstampWsMessage::from_json(
+            r#"{"event":"bts:subscription_succeeded","channel":"live_trades_btcusd"}"#,
+        )
+        .unwrap();
+        assert!(a.handle_message(&msg).is_none());
+    }
+
+    #[test]
+    fn test_handle_message_unknown_returns_none() {
+        let mut a = adapter();
+        let msg: BitstampWsMessage =
+            BitstampWsMessage::from_json(r#"{"channel":"nonsense_btcusd","data":{"x":1}}"#)
+                .unwrap();
+        assert!(a.handle_message(&msg).is_none());
+    }
+}

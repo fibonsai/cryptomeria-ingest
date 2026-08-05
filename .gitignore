@@ -52,6 +52,13 @@ graphify-out/**
 # Never commit temp plan file
 docs/PLAN.md
 
+# Coverage reports
+coverage/
+coverage_report/
+cobertura.xml
+*.cobertura.xml
+*.proptest-regressions
+
 # Ignore worktrees
 .worktrees/**
 .grepai/
