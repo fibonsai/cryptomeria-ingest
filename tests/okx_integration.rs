@@ -4,8 +4,8 @@ async fn okx_live_test() {
     // This test connects to OKX live WebSocket and verifies we receive at least one MarketDataItem.
     // It is ignored by default because it requires network access.
     // Run with: cargo test --manifest-path rs/ingest/Cargo.toml -- --include-ignored
-    use cryptomeria_ingest::{stream, DataSourceConfig, DataKind};
-    use futures_util::StreamExt;
+use cryptomeria_ingest::{stream, DataSourceConfig, DataKind};
+use futures_util::StreamExt;
 
     let config = DataSourceConfig {
         exchange: "okx".into(),

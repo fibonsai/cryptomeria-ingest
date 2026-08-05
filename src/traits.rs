@@ -21,6 +21,7 @@ impl LobFilter {
     /// Levels with `amount == 0` (removals) are always included to maintain
     /// LOB consistency. For `MaxLevel`, price updates at existing levels are
     /// always included.
+    #[allow(clippy::too_many_arguments)]
     pub fn should_include(
         &self,
         best_bid: Option<f64>,

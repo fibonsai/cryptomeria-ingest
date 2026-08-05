@@ -171,20 +171,18 @@ impl OrderBook {
                 }
             }
             MessageType::Trade => {
-                if let Ok(trade) = serde_json::from_value::<TradeData>(data.clone()) {
-                    if let Some(price) = trade.price_f64()
-                        && let Some(amount) = trade.amount_f64()
-                    {
-                        let side = if trade.side() == "buy" { Side::Bid } else { Side::Ask };
-                        self.apply_order(&OrderEntry {
-                            id: trade.id,
-                            id_str: "".to_string(),
-                            price: format!("{:.8}", price),
-                            amount: format!("{:.8}", amount),
-                            order_type: if side == Side::Bid { 0 } else { 1 },
-                            timestamp: trade.timestamp.clone(),
-                        });
-                    }
+                if let Ok(trade) = serde_json::from_value::<TradeData>(data.clone())
+                    && let (Some(price), Some(amount)) = (trade.price_f64(), trade.amount_f64())
+                {
+                    let side = if trade.side() == "buy" { Side::Bid } else { Side::Ask };
+                    self.apply_order(&OrderEntry {
+                        id: trade.id,
+                        id_str: "".to_string(),
+                        price: format!("{:.8}", price),
+                        amount: format!("{:.8}", amount),
+                        order_type: if side == Side::Bid { 0 } else { 1 },
+                        timestamp: trade.timestamp.clone(),
+                    });
                 }
             }
             _ => {}
@@ -193,31 +191,31 @@ impl OrderBook {
 
     pub fn apply_orderbook(&mut self, ob: &OrderBookData) {
         for level in &ob.bids {
-            if level.len() >= 2 {
-                if let (Ok(price), Ok(amount)) = (level[0].parse::<f64>(), level[1].parse::<f64>()) {
-                    self.apply_order(&OrderEntry {
-                        id: 0, // dummy
-                        id_str: "".to_string(),
-                        price: format!("{:.8}", price),
-                        amount: format!("{:.8}", amount),
-                        order_type: 0, // bid
-                        timestamp: "0".to_string(),
-                    });
-                }
+            if level.len() >= 2
+                && let (Ok(price), Ok(amount)) = (level[0].parse::<f64>(), level[1].parse::<f64>())
+            {
+                self.apply_order(&OrderEntry {
+                    id: 0, // dummy
+                    id_str: "".to_string(),
+                    price: format!("{:.8}", price),
+                    amount: format!("{:.8}", amount),
+                    order_type: 0, // bid
+                    timestamp: "0".to_string(),
+                });
             }
         }
         for level in &ob.asks {
-            if level.len() >= 2 {
-                if let (Ok(price), Ok(amount)) = (level[0].parse::<f64>(), level[1].parse::<f64>()) {
-                    self.apply_order(&OrderEntry {
-                        id: 0, // dummy
-                        id_str: "".to_string(),
-                        price: format!("{:.8}", price),
-                        amount: format!("{:.8}", amount),
-                        order_type: 1, // ask
-                        timestamp: "0".to_string(),
-                    });
-                }
+            if level.len() >= 2
+                && let (Ok(price), Ok(amount)) = (level[0].parse::<f64>(), level[1].parse::<f64>())
+            {
+                self.apply_order(&OrderEntry {
+                    id: 0, // dummy
+                    id_str: "".to_string(),
+                    price: format!("{:.8}", price),
+                    amount: format!("{:.8}", amount),
+                    order_type: 1, // ask
+                    timestamp: "0".to_string(),
+                });
             }
         }
     }

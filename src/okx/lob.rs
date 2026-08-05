@@ -442,7 +442,7 @@ mod tests {
         );
         book.apply_update(&[price_level("100.0", "0.0")], Side::Bid);
         assert_eq!(book.num_bids(), 1);
-        assert!(book.bids.get(&Reverse(OrderedFloat(100.0))).is_none());
+        assert!(!book.bids.contains_key(&Reverse(OrderedFloat(100.0))));
     }
 
     #[test]
@@ -691,9 +691,8 @@ mod tests {
             &[price_level("103.0", "5.0")], // new ask at 103.0
             Side::Ask,
         );
-
-assert_eq!(book.num_bids(), 3);
-assert!((book.best_bid().unwrap() - 100.0).abs() < f64::EPSILON);
+        assert_eq!(book.num_bids(), 3);
+        assert!((book.best_bid().unwrap() - 100.0).abs() < f64::EPSILON);
         assert_eq!(book.num_asks(), 4);
 
         // 3. Verify levels_within_pct with narrow filter (0.1%)
