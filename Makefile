@@ -20,6 +20,11 @@ help:
 	@echo "  coverage      Run tests with coverage via cargo-tarpaulin"
 	@echo "  coverage-report   Serve the coverage HTML report"
 	@echo "  audit         Run cargo audit (fails on vulnerabilities)"
+<<<<<<< HEAD
+=======
+	@echo "  check-audit   Run cargo audit (alias for audit)"
+
+>>>>>>> ccdf9c2 (Add cargo audit enforcement to CI and Makefile)
 
 
 # =============================================================================
@@ -63,3 +68,9 @@ coverage-report:
 
 audit:
 	cargo audit
+<<<<<<< HEAD
+=======
+
+check-audit:
+	cargo audit
+>>>>>>> ccdf9c2 (Add cargo audit enforcement to CI and Makefile)
