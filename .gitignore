@@ -54,3 +54,4 @@ docs/PLAN.md
 
 # Ignore worktrees
 .worktrees/**
+.grepai/
