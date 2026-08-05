@@ -64,7 +64,7 @@ impl KrakenAdapter {
             .bids
             .iter()
             .map(|(k, v)| LobLevel {
-                price: k.0 .0,
+                price: k.0.0,
                 size: *v,
             })
             .collect();
@@ -149,7 +149,10 @@ impl ExchangeAdapter for KrakenAdapter {
     }
 
     fn handle_heartbeat(&self, msg: &Self::Message) -> bool {
-        matches!(msg.message_type(), MessageType::Heartbeat | MessageType::Event)
+        matches!(
+            msg.message_type(),
+            MessageType::Heartbeat | MessageType::Event
+        )
     }
 
     fn url(&self) -> String {

@@ -1,6 +1,6 @@
 use crate::okx::types::OkxWsMessage;
 use crate::okx::types::{PriceLevel, extract_levels};
-use crate::traits::{OrderBook as OrderBookTrait, LevelsWithinPct, LobFilter};
+use crate::traits::{LevelsWithinPct, LobFilter, OrderBook as OrderBookTrait};
 use ordered_float::OrderedFloat;
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
@@ -249,7 +249,9 @@ impl OrderBook {
             LobFilter::MaxLevel(max) => {
                 let mut parsed: Vec<(f64, f64, PriceLevel)> = levels
                     .iter()
-                    .filter_map(|level| parse_price_level(level).map(|(p, a)| (p, a, level.clone())))
+                    .filter_map(|level| {
+                        parse_price_level(level).map(|(p, a)| (p, a, level.clone()))
+                    })
                     .filter(|(_, amount, _)| *amount > 0.0)
                     .collect();
                 match side {

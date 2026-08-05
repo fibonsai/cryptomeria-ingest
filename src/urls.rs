@@ -65,12 +65,18 @@ mod tests {
 
     #[test]
     fn test_okx_global_ws() {
-        assert_eq!(websocket_url("global", "okx"), "wss://ws.okx.com:8443/ws/v5/public");
+        assert_eq!(
+            websocket_url("global", "okx"),
+            "wss://ws.okx.com:8443/ws/v5/public"
+        );
     }
 
     #[test]
     fn test_okx_europe_ws() {
-        assert_eq!(websocket_url("europe", "okx"), "wss://wseea.okx.com:8443/ws/v5/public");
+        assert_eq!(
+            websocket_url("europe", "okx"),
+            "wss://wseea.okx.com:8443/ws/v5/public"
+        );
     }
 
     #[test]
@@ -85,6 +91,9 @@ mod tests {
 
     #[test]
     fn test_bitstamp_rest() {
-        assert_eq!(rest_url("global", "bitstamp"), "https://www.bitstamp.net/api/v2");
+        assert_eq!(
+            rest_url("global", "bitstamp"),
+            "https://www.bitstamp.net/api/v2"
+        );
     }
 }

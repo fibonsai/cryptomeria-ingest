@@ -1,6 +1,6 @@
 use crate::items::{IngestError, MarketDataItem};
 use crate::logging;
-use futures_util::{Stream, StreamExt, stream, SinkExt};
+use futures_util::{SinkExt, Stream, StreamExt, stream};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -22,7 +22,8 @@ const JITTER_MS: u64 = 1000;
 /// `attempt` is the number of failed attempts so far (0 for first attempt).
 /// Returns the delay duration.
 pub fn backoff_delay(attempt: u64) -> Duration {
-    let base = (INITIAL_BACKOFF_MS as f64 * BACKOFF_MULTIPLIER.powi(attempt as i32)).min(MAX_BACKOFF_MS as f64);
+    let base = (INITIAL_BACKOFF_MS as f64 * BACKOFF_MULTIPLIER.powi(attempt as i32))
+        .min(MAX_BACKOFF_MS as f64);
     let jitter = (fastrand::f64() * 2.0 * JITTER_MS as f64 - JITTER_MS as f64) as u64;
     let ms = (base + jitter as f64) as u64;
     Duration::from_millis(ms)
@@ -85,7 +86,9 @@ pub trait ExchangeAdapter: Send + 'static {
     /// Optional async hook called after reconnection to fetch a snapshot (e.g. Bitstamp).
     /// Returns a vector of initial market data items (usually a single LobItem snapshot).
     /// Default implementation returns Ok(vec![]).
-    fn on_reconnect(&mut self) -> impl std::future::Future<Output = Result<Vec<MarketDataItem>, String>> + Send {
+    fn on_reconnect(
+        &mut self,
+    ) -> impl std::future::Future<Output = Result<Vec<MarketDataItem>, String>> + Send {
         async { Ok(vec![]) }
     }
 }
@@ -102,7 +105,9 @@ where
     A: ExchangeAdapter,
 {
     // Validate config.
-    config.validate().map_err(|e| IngestError::Config(e.to_string()))?;
+    config
+        .validate()
+        .map_err(|e| IngestError::Config(e.to_string()))?;
 
     // Channel for communication between the worker task and the stream.
     let (tx, rx) = mpsc::channel::<Result<MarketDataItem, IngestError>>(1024);
@@ -137,7 +142,10 @@ where
                     continue;
                 }
             };
-            logging::info("WS connected", &format!("instrument={instrument} url={url}"));
+            logging::info(
+                "WS connected",
+                &format!("instrument={instrument} url={url}"),
+            );
 
             // Split into sender and receiver.
             let (mut write, mut read) = ws_stream.split();
@@ -276,8 +284,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_backoff_delay() {
-        assert_eq!(backoff_delay(0), Duration::from_millis(INITIAL_BACKOFF_MS));
         // Note: due to jitter, we can't assert exact values, but we can check bounds.
+        let d0 = backoff_delay(0);
+        assert!(d0 >= Duration::from_millis(INITIAL_BACKOFF_MS));
+        assert!(d0 <= Duration::from_millis(INITIAL_BACKOFF_MS + 2 * JITTER_MS));
         let d1 = backoff_delay(1);
         assert!(d1 >= Duration::from_millis(INITIAL_BACKOFF_MS));
         assert!(d1 <= Duration::from_millis(2 * INITIAL_BACKOFF_MS + 2 * JITTER_MS));

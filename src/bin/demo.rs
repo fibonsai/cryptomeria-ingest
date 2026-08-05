@@ -2,13 +2,16 @@ use std::env;
 
 use futures_util::StreamExt;
 
-use cryptomeria_ingest::{stream, DataSourceConfig, DataKind};
+use cryptomeria_ingest::{DataKind, DataSourceConfig, stream};
 
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 3 {
-        eprintln!("Usage: {} <exchange> <instrument> [lob|trade|both]", args[0]);
+        eprintln!(
+            "Usage: {} <exchange> <instrument> [lob|trade|both]",
+            args[0]
+        );
         eprintln!("Example: {} okx BTC-USDT both", args[0]);
         std::process::exit(1);
     }
@@ -44,7 +47,10 @@ async fn main() {
         std::process::exit(1);
     }
 
-    println!("Subscribing to {} {} ({})...", exchange, instrument, data_kind);
+    println!(
+        "Subscribing to {} {} ({})...",
+        exchange, instrument, data_kind
+    );
 
     let mut stream = match stream(config).await {
         Ok(s) => s,

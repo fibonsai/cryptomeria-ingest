@@ -11,8 +11,7 @@ use std::pin::Pin;
 /// `Result<MarketDataItem, IngestError>`.
 pub async fn stream(
     config: DataSourceConfig,
-) -> Result<Pin<Box<dyn Stream<Item = Result<MarketDataItem, IngestError>> + Send>>, IngestError>
-{
+) -> Result<Pin<Box<dyn Stream<Item = Result<MarketDataItem, IngestError>> + Send>>, IngestError> {
     config.validate()?;
     let stream_handle = match config.exchange.as_str() {
         "okx" => {
@@ -47,7 +46,12 @@ pub async fn stream(
             );
             run_exchange_stream(config, adapter).await?
         }
-        _ => return Err(IngestError::Config(format!("unknown exchange: {}", config.exchange))),
+        _ => {
+            return Err(IngestError::Config(format!(
+                "unknown exchange: {}",
+                config.exchange
+            )));
+        }
     };
 
     Ok(Box::pin(stream_handle))

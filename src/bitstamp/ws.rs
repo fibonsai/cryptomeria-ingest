@@ -1,10 +1,10 @@
-use crate::items::{LobItem, LobLevel, MarketDataItem, TradeItem};
 use crate::bitstamp::lob::OrderBook;
 use crate::bitstamp::types::{BitstampWsMessage, MessageType, OrderBookData, TradeData};
+use crate::items::{LobItem, LobLevel, MarketDataItem, TradeItem};
 use crate::logging;
 use crate::traits::LobFilter;
-use crate::wsloop::ExchangeAdapter;
 use crate::urls::rest_url;
+use crate::wsloop::ExchangeAdapter;
 
 /// Subscribe message builder for Bitstamp.
 pub fn build_subscribe_msg(channel: &str) -> String {
@@ -73,7 +73,7 @@ impl BitstampAdapter {
             .bids
             .iter()
             .map(|(k, v)| LobLevel {
-                price: k.0 .0,
+                price: k.0.0,
                 size: *v,
             })
             .collect();
@@ -110,12 +110,12 @@ impl BitstampAdapter {
         // Apply snapshot to a temporary book to generate the normalized LobItem.
         let mut temp_book = OrderBook::new();
         temp_book.apply_orderbook(&data);
-        let ts = data
-            .timestamp_ms()
-            .unwrap_or_else(|| std::time::SystemTime::now()
+        let ts = data.timestamp_ms().unwrap_or_else(|| {
+            std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
-                .as_millis() as u64);
+                .as_millis() as u64
+        });
         Ok(vec![self.normalize_lob(&temp_book, ts)])
     }
 }
@@ -128,8 +128,14 @@ impl ExchangeAdapter for BitstampAdapter {
     }
 
     fn subscribe_msgs(&self) -> Vec<String> {
-        let orders_channel = format!("diff_order_book_{}", crate::bitstamp::types::instrument_to_channel(&self.instrument));
-        let trades_channel = format!("live_trades_{}", crate::bitstamp::types::instrument_to_channel(&self.instrument));
+        let orders_channel = format!(
+            "diff_order_book_{}",
+            crate::bitstamp::types::instrument_to_channel(&self.instrument)
+        );
+        let trades_channel = format!(
+            "live_trades_{}",
+            crate::bitstamp::types::instrument_to_channel(&self.instrument)
+        );
         vec![
             build_subscribe_msg(&orders_channel),
             build_subscribe_msg(&trades_channel),

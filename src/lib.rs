@@ -36,19 +36,19 @@
 
 pub mod config;
 pub mod items;
+pub mod logging;
 pub mod stream;
 pub mod traits;
 pub mod urls;
-pub mod logging;
 pub mod wsloop;
 
-pub mod okx;
-pub mod kraken;
 pub mod bitstamp;
+pub mod kraken;
+pub mod okx;
 
-pub use config::{DataSourceConfig, DataKind, ResilienceConfig};
-pub use items::{MarketDataItem, LobItem, TradeItem, IngestError};
+pub use config::{DataKind, DataSourceConfig, ResilienceConfig};
+pub use items::{IngestError, LobItem, MarketDataItem, TradeItem};
+pub use logging::{debug, error, info, init, warn};
 pub use stream::stream;
-pub use traits::{OrderBook, LobFilter, LevelVec, LevelsWithinPct};
-pub use urls::{websocket_url, rest_url};
-pub use logging::{init, info, warn, error, debug};
+pub use traits::{LevelVec, LevelsWithinPct, LobFilter, OrderBook};
+pub use urls::{rest_url, websocket_url};
