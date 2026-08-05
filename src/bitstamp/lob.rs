@@ -1,4 +1,6 @@
-use crate::bitstamp::types::{BitstampWsMessage, OrderEntry, OrderBookData, TradeData, MessageType};
+use crate::bitstamp::types::{
+    BitstampWsMessage, MessageType, OrderBookData, OrderEntry, TradeData,
+};
 use crate::traits::{LevelsWithinPct, LobFilter, OrderBook as OrderBookTrait};
 use ordered_float::OrderedFloat;
 use std::cmp::Reverse;
@@ -174,7 +176,11 @@ impl OrderBook {
                 if let Ok(trade) = serde_json::from_value::<TradeData>(data.clone())
                     && let (Some(price), Some(amount)) = (trade.price_f64(), trade.amount_f64())
                 {
-                    let side = if trade.side() == "buy" { Side::Bid } else { Side::Ask };
+                    let side = if trade.side() == "buy" {
+                        Side::Bid
+                    } else {
+                        Side::Ask
+                    };
                     self.apply_order(&OrderEntry {
                         id: trade.id,
                         id_str: "".to_string(),
@@ -226,7 +232,8 @@ impl OrderBook {
 
         ob.bids.retain(|level| {
             if level.len() >= 2 {
-                if let (Ok(price), Ok(amount)) = (level[0].parse::<f64>(), level[1].parse::<f64>()) {
+                if let (Ok(price), Ok(amount)) = (level[0].parse::<f64>(), level[1].parse::<f64>())
+                {
                     let side_is_bid = true;
                     let current_levels = self.num_bids();
                     let price_exists = self.bids.contains_key(&Reverse(OrderedFloat(price)));
@@ -249,7 +256,8 @@ impl OrderBook {
 
         ob.asks.retain(|level| {
             if level.len() >= 2 {
-                if let (Ok(price), Ok(amount)) = (level[0].parse::<f64>(), level[1].parse::<f64>()) {
+                if let (Ok(price), Ok(amount)) = (level[0].parse::<f64>(), level[1].parse::<f64>())
+                {
                     let side_is_bid = false;
                     let current_levels = self.num_asks();
                     let price_exists = self.asks.contains_key(&OrderedFloat(price));
@@ -447,8 +455,14 @@ mod tests {
     fn test_orderbook_snapshot_apply() {
         let mut book = OrderBook::new();
         let ob = OrderBookData {
-            bids: vec![["100.0".into(), "1.5".into()], ["99.0".into(), "2.0".into()]],
-            asks: vec![["101.0".into(), "0.5".into()], ["102.0".into(), "1.0".into()]],
+            bids: vec![
+                ["100.0".into(), "1.5".into()],
+                ["99.0".into(), "2.0".into()],
+            ],
+            asks: vec![
+                ["101.0".into(), "0.5".into()],
+                ["102.0".into(), "1.0".into()],
+            ],
             timestamp: "0".to_string(),
             microtimestamp: "0".to_string(),
         };
@@ -476,7 +490,10 @@ mod tests {
     fn test_display_contains_counts() {
         let mut book = OrderBook::new();
         let ob = OrderBookData {
-            bids: vec![["100.0".into(), "1.0".into()], ["99.0".into(), "2.0".into()]],
+            bids: vec![
+                ["100.0".into(), "1.0".into()],
+                ["99.0".into(), "2.0".into()],
+            ],
             asks: vec![["101.0".into(), "3.0".into()]],
             timestamp: "0".to_string(),
             microtimestamp: "0".to_string(),

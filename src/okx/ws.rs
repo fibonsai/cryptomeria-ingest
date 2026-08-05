@@ -64,7 +64,7 @@ impl OkxAdapter {
             .bids
             .iter()
             .map(|(k, v)| LobLevel {
-                price: k.0 .0,
+                price: k.0.0,
                 size: *v,
             })
             .collect();

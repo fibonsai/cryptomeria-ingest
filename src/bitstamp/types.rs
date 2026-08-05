@@ -49,7 +49,11 @@ pub struct OrderEntry {
     pub amount: String,
 
     /// 0 = bid, 1 = ask
-    #[serde(default, rename = "type", deserialize_with = "deserialize_number_or_zero")]
+    #[serde(
+        default,
+        rename = "type",
+        deserialize_with = "deserialize_number_or_zero"
+    )]
     pub order_type: i64,
 
     #[serde(default)]
@@ -85,7 +89,11 @@ pub struct TradeData {
     pub amount: String,
 
     /// 0 = buy, 1 = sell
-    #[serde(default, rename = "type", deserialize_with = "deserialize_number_or_zero")]
+    #[serde(
+        default,
+        rename = "type",
+        deserialize_with = "deserialize_number_or_zero"
+    )]
     pub trade_type: i64,
 
     #[serde(default)]

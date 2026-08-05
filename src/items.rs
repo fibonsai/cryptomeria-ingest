@@ -87,7 +87,9 @@ impl fmt::Display for IngestError {
             IngestError::Connection(s) => write!(f, "connection error: {s}"),
             IngestError::Subscribe(s) => write!(f, "subscribe error: {s}"),
             IngestError::Parse(s) => write!(f, "parse error: {s}"),
-            IngestError::MaxReconnectsExceeded(n) => write!(f, "max reconnect attempts ({n}) exceeded"),
+            IngestError::MaxReconnectsExceeded(n) => {
+                write!(f, "max reconnect attempts ({n}) exceeded")
+            }
             IngestError::ChannelClosed => write!(f, "channel closed"),
             IngestError::Heartbeat(s) => write!(f, "heartbeat error: {s}"),
             IngestError::Exchange(s) => write!(f, "exchange error: {s}"),

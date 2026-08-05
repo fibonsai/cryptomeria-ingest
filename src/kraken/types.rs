@@ -223,7 +223,11 @@ pub struct TradeData {
     pub price: f64,
     #[serde(default)]
     pub qty: f64,
-    #[serde(default, rename = "trade_id", deserialize_with = "deserialize_number_or_string")]
+    #[serde(
+        default,
+        rename = "trade_id",
+        deserialize_with = "deserialize_number_or_string"
+    )]
     pub trade_id: String,
     #[serde(default)]
     pub timestamp: String,
