@@ -1,7 +1,4 @@
-use ordered_float::OrderedFloat;
 use serde::Serialize;
-use std::cmp::Reverse;
-use std::collections::BTreeMap;
 
 /// Type alias for a single vector of (price, size) levels.
 pub type LevelVec = Vec<(f64, f64)>;

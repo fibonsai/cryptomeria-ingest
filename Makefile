@@ -29,6 +29,9 @@ build-release:
 test:
 	cargo test
 
+test-integration:
+	cargo test --tests
+
 lint:
 	cargo clippy --all-targets -- -W warnings
 

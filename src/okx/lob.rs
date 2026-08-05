@@ -1,8 +1,7 @@
 use crate::okx::types::OkxWsMessage;
-use crate::okx::types::{PriceLevel, LobData, LobLevel, extract_levels};
-use crate::traits::{OrderBook as OrderBookTrait, LevelVec, LevelsWithinPct, LobFilter};
+use crate::okx::types::{PriceLevel, extract_levels};
+use crate::traits::{OrderBook as OrderBookTrait, LevelsWithinPct, LobFilter};
 use ordered_float::OrderedFloat;
-use serde_json::Value;
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
 
@@ -693,11 +692,8 @@ mod tests {
             Side::Ask,
         );
 
-        assert_eq!(book.num_bids(), 3);
-        assert!(
-            (book.best_bid().unwrap() - 100.0).abs() < f64::EPSILON,
-            true
-        );
+assert_eq!(book.num_bids(), 3);
+assert!((book.best_bid().unwrap() - 100.0).abs() < f64::EPSILON);
         assert_eq!(book.num_asks(), 4);
 
         // 3. Verify levels_within_pct with narrow filter (0.1%)

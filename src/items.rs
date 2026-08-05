@@ -1,3 +1,4 @@
+use crate::config::ConfigError;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -97,9 +98,9 @@ impl fmt::Display for IngestError {
 
 impl std::error::Error for IngestError {}
 
-impl From<tokio_tungstenite::tungstenite::Error> for IngestError {
-    fn from(e: tokio_tungstenite::tungstenite::Error) -> Self {
-        IngestError::Connection(e.to_string())
+impl From<ConfigError> for IngestError {
+    fn from(err: ConfigError) -> Self {
+        IngestError::Config(err.to_string())
     }
 }
 

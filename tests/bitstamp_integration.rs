@@ -5,6 +5,7 @@ async fn bitstamp_live_test() {
     // It is ignored by default because it requires network access.
     // Run with: cargo test --manifest-path rs/ingest/Cargo.toml -- --include-ignored
     use cryptomeria_ingest::{stream, DataSourceConfig, DataKind};
+    use futures_util::StreamExt;
 
     let config = DataSourceConfig {
         exchange: "bitstamp".into(),

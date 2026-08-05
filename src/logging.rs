@@ -35,26 +35,26 @@ pub fn init() {
     init_logger();
 }
 
-fn log(level: Level, source: &str, msg: &str) {
+fn log(level: Level, source: &str, msg: String) {
     let logger = init_logger();
     let mut logger = logger.lock().unwrap();
     logger.log(level, &format!("[{}] {}", source, msg));
 }
 
 pub fn info(source: &str, msg: &str) {
-    log(Level::Info, source, msg);
+    log(Level::Info, source, msg.to_string());
 }
 
 pub fn warn(source: &str, msg: &str) {
-    log(Level::Warning, source, msg);
+    log(Level::Warning, source, msg.to_string());
 }
 
 pub fn error(source: &str, msg: &str) {
-    log(Level::Error, source, msg);
+    log(Level::Error, source, msg.to_string());
 }
 
 pub fn debug(source: &str, msg: &str) {
-    log(Level::Debug, source, msg);
+    log(Level::Debug, source, msg.to_string());
 }
 
 #[cfg(test)]
