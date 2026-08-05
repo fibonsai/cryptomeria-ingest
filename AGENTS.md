@@ -17,6 +17,8 @@ Multi-exchange crypto market data ingestion library (OKX, Kraken, Bitstamp) that
 - `make coverage-install` - Install cargo-tarpaulin
 - `make coverage` - Run tests with coverage (XML + HTML reports)
 - `make coverage-report` - Serve HTML coverage report locally
+- `make audit` - Run cargo-audit (fails on vulnerabilities)
+- `cargo audit` - Run cargo-audit directly
 - `cargo run --bin cryptomeria-ingest-demo` - Run demo application
 
 ### Testing Details
