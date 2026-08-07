@@ -20,6 +20,10 @@ struct Cli {
     region: Option<String>,
     #[clap(long)]
     instrument: Option<String>,
+    /// Optional alias to select a per-exchange fallback mapping
+    /// (`fallback[exchange][alias]`). Defaults to the exchange-only rule.
+    #[clap(long)]
+    alias: Option<String>,
     #[clap(long)]
     data_kind: Option<String>,
     #[clap(long)]
@@ -90,6 +94,7 @@ async fn main() {
             instrument: cli
                 .instrument
                 .expect("instrument is required when not using --config"),
+            alias: cli.alias,
             data_kind,
             max_level: cli.max_level,
             max_level_pct: cli.max_level_pct.unwrap_or(0.0),

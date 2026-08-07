@@ -46,9 +46,9 @@ case_fallback = "lower"
 
 #[test]
 fn test_data_source_config_with_fallback() {
-    let mut fallback = HashMap::new();
-    fallback.insert(
-        "okx".to_string(),
+    let mut okx_aliases = HashMap::new();
+    okx_aliases.insert(
+        "btcusd".to_string(),
         ExchangeFallbackMapping {
             base_mappings: vec!["XBT".to_string(), "BTC".to_string()],
             quote_mappings: vec!["USDT".to_string(), "USDC".to_string(), "USD".to_string()],
@@ -56,20 +56,24 @@ fn test_data_source_config_with_fallback() {
             case_fallback: CaseFallback::Lower,
         },
     );
-    fallback.insert(
-        "kraken".to_string(),
+    okx_aliases.insert(
+        "ethusdt".to_string(),
         ExchangeFallbackMapping {
-            base_mappings: vec!["BTC".to_string(), "XBT".to_string()],
-            quote_mappings: vec!["USD".to_string(), "USDT".to_string(), "USDC".to_string()],
-            separator_mappings: vec!["-".to_string(), "/".to_string(), "".to_string()],
-            case_fallback: CaseFallback::Upper,
+            base_mappings: vec!["ETH".to_string()],
+            quote_mappings: vec!["USDT".to_string()],
+            separator_mappings: vec!["-".to_string()],
+            case_fallback: CaseFallback::Lower,
         },
     );
+
+    let mut fallback = HashMap::new();
+    fallback.insert("okx".to_string(), okx_aliases);
 
     let config = DataSourceConfig {
         exchange: "okx".to_string(),
         region: "global".to_string(),
         instrument: "XBT/USDT".to_string(),
+        alias: Some("btcusd".to_string()),
         data_kind: cryptomeria_ingest::config::DataKind::LOB,
         max_level: None,
         max_level_pct: 0.0,
@@ -79,15 +83,18 @@ fn test_data_source_config_with_fallback() {
     };
 
     assert!(config.validate().is_ok());
-    assert_eq!(config.fallback.len(), 2);
-    assert!(config.fallback.contains_key("okx"));
-    assert!(config.fallback.contains_key("kraken"));
+    assert_eq!(config.fallback.len(), 1);
+    let okx = config.fallback.get("okx").unwrap();
+    assert!(okx.contains_key("btcusd"));
+    assert!(okx.contains_key("ethusdt"));
+    assert_eq!(config.alias.as_deref(), Some("btcusd"));
 }
 
 #[test]
 fn test_data_source_config_default_fallback_empty() {
     let config = DataSourceConfig::default();
     assert!(config.fallback.is_empty());
+    assert!(config.alias.is_none());
 }
 
 #[test]
@@ -96,8 +103,10 @@ fn test_data_source_config_deserialize_with_fallback() {
 exchange = "okx"
 region = "global"
 instrument = "XBT/USDT"
+alias = "btcusd"
 data_kind = "Lob"
-[fallback.okx]
+
+[fallback.okx.btcusd]
 base_mappings = ["XBT", "BTC"]
 quote_mappings = ["USDT", "USDC", "USD"]
 separator_mappings = ["/", "-", ""]
@@ -106,10 +115,34 @@ case_fallback = "lower"
     let config: DataSourceConfig = toml::from_str(toml_str).unwrap();
     assert_eq!(config.exchange, "okx");
     assert_eq!(config.instrument, "XBT/USDT");
-    assert!(config.fallback.contains_key("okx"));
-    let okx_fallback = config.fallback.get("okx").unwrap();
-    assert_eq!(okx_fallback.base_mappings, vec!["XBT", "BTC"]);
-    assert_eq!(okx_fallback.quote_mappings, vec!["USDT", "USDC", "USD"]);
-    assert_eq!(okx_fallback.separator_mappings, vec!["/", "-", ""]);
-    assert_eq!(okx_fallback.case_fallback, CaseFallback::Lower);
+    assert_eq!(config.alias.as_deref(), Some("btcusd"));
+
+    let okx = config.fallback.get("okx").expect("okx fallback table");
+    let btcusd = okx.get("btcusd").expect("btcusd alias mapping");
+    assert_eq!(btcusd.base_mappings, vec!["XBT", "BTC"]);
+    assert_eq!(btcusd.quote_mappings, vec!["USDT", "USDC", "USD"]);
+    assert_eq!(btcusd.separator_mappings, vec!["/", "-", ""]);
+    assert_eq!(btcusd.case_fallback, CaseFallback::Lower);
+}
+
+#[test]
+fn test_data_source_config_deserialize_exchange_only_fallback() {
+    // The empty-string alias is the exchange-only fallback (no per-instrument alias).
+    let toml_str = r#"
+exchange = "okx"
+region = "global"
+instrument = "XBT/USDT"
+data_kind = "Lob"
+
+[fallback.okx.""]
+base_mappings = ["BTC"]
+quote_mappings = ["USDT"]
+separator_mappings = ["-"]
+case_fallback = "upper"
+"#;
+    let config: DataSourceConfig = toml::from_str(toml_str).unwrap();
+    assert_eq!(config.alias, None);
+    let okx = config.fallback.get("okx").unwrap();
+    let default_mapping = okx.get("").unwrap();
+    assert_eq!(default_mapping.case_fallback, CaseFallback::Upper);
 }

@@ -1,6 +1,7 @@
 use crate::config::{DataSourceConfig, ExchangeFallbackMapping};
 use crate::items::IngestError;
 use reqwest::Client;
+use std::collections::HashMap;
 
 /// Exchange-specific validator enum (dyn-compatible).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,6 +84,24 @@ fn apply_case_fallback(s: &str, case_fallback: crate::config::CaseFallback) -> S
     }
 }
 
+/// Select the fallback mapping for a given exchange and alias.
+///
+/// The user-provided `alias` selects a per-instrument rule set; if it is
+/// absent or has no matching entry, the exchange-only rule under the empty-
+/// string alias (`""`) is used as the default. Returns `None` when no mapping
+/// is available for the exchange.
+pub fn select_fallback_mapping<'a>(
+    exchange: &'a str,
+    alias: Option<&str>,
+    fallback: &'a HashMap<String, HashMap<String, ExchangeFallbackMapping>>,
+) -> Option<&'a ExchangeFallbackMapping> {
+    fallback.get(exchange).and_then(|aliases| {
+        alias
+            .and_then(|a| aliases.get(a))
+            .or_else(|| aliases.get(""))
+    })
+}
+
 /// Validate instrument with fallback mapping.
 /// Returns the validated instrument (original or fallback) or an error.
 pub async fn validate_with_fallback(
@@ -109,8 +128,9 @@ pub async fn validate_with_fallback(
         }
     }
 
-    // If validation fails, try fallback mappings
-    if let Some(mapping) = config.fallback.get(&config.exchange) {
+    // If validation fails, try fallback mappings keyed by (exchange, alias).
+    let alias = config.alias.as_deref();
+    if let Some(mapping) = select_fallback_mapping(&config.exchange, alias, &config.fallback) {
         let variants = generate_fallback_variants(&config.instrument, mapping);
 
         for variant in variants {
@@ -149,6 +169,15 @@ pub async fn validate_with_fallback(
 mod tests {
     use super::*;
     use crate::config::{CaseFallback, ExchangeFallbackMapping};
+
+    fn mapping() -> ExchangeFallbackMapping {
+        ExchangeFallbackMapping {
+            base_mappings: vec!["BTC".to_string(), "XBT".to_string()],
+            quote_mappings: vec!["USDT".to_string(), "USD".to_string()],
+            separator_mappings: vec!["-".to_string(), "/".to_string()],
+            case_fallback: CaseFallback::Upper,
+        }
+    }
 
     #[test]
     fn test_apply_case_fallback() {
@@ -229,5 +258,50 @@ mod tests {
         assert_eq!(ExchangeValidator::Okx.exchange_name(), "okx");
         assert_eq!(ExchangeValidator::Kraken.exchange_name(), "kraken");
         assert_eq!(ExchangeValidator::Bitstamp.exchange_name(), "bitstamp");
+    }
+
+    #[test]
+    fn test_select_fallback_mapping_by_alias() {
+        let mut aliases = HashMap::new();
+        aliases.insert("btcusd".to_string(), mapping());
+        let mut fallback = HashMap::new();
+        fallback.insert("okx".to_string(), aliases);
+
+        // Explicit alias selects the per-instrument rule set.
+        let got = select_fallback_mapping("okx", Some("btcusd"), &fallback).unwrap();
+        assert_eq!(got.base_mappings, vec!["BTC", "XBT"]);
+    }
+
+    #[test]
+    fn test_select_fallback_mapping_falls_back_to_exchange_only() {
+        let mut aliases = HashMap::new();
+        aliases.insert("btcusd".to_string(), mapping());
+        aliases.insert("".to_string(), mapping());
+        let mut fallback = HashMap::new();
+        fallback.insert("okx".to_string(), aliases);
+
+        // When alias is None, the empty-string (exchange-only) rule is used.
+        let got = select_fallback_mapping("okx", None, &fallback).unwrap();
+        assert_eq!(got.base_mappings, vec!["BTC", "XBT"]);
+    }
+
+    #[test]
+    fn test_select_fallback_mapping_unknown_alias_falls_back() {
+        let mut aliases = HashMap::new();
+        aliases.insert("".to_string(), mapping());
+        let mut fallback = HashMap::new();
+        fallback.insert("okx".to_string(), aliases);
+
+        // An alias with no entry falls back to the exchange-only rule.
+        let got = select_fallback_mapping("okx", Some("nope"), &fallback).unwrap();
+        assert_eq!(got.quote_mappings, vec!["USDT", "USD"]);
+    }
+
+    #[test]
+    fn test_select_fallback_mapping_missing_exchange() {
+        let fallback = HashMap::<String, HashMap<String, ExchangeFallbackMapping>>::new();
+
+        assert!(select_fallback_mapping("okx", Some("btcusd"), &fallback).is_none());
+        assert!(select_fallback_mapping("okx", None, &fallback).is_none());
     }
 }
