@@ -1,10 +1,10 @@
 [package]
 name = "cryptomeria-ingest"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2024"
 license = "Apache-2.0"
 description = "Multi-exchange crypto market data ingestion library (OKX, Kraken, Bitstamp) — connects to exchange WS and returns a stream of normalized LOB/trade data"
-repository = "https://github.com/fibonsai/cryptomeria"
+repository = "https://github.com/fibonsai/cryptomeria-ingest"
 keywords = ["crypto", "market-data", "websocket", "order-book", "trades"]
 
 [dependencies]
