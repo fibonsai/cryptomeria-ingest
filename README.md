@@ -290,12 +290,11 @@ let config = DataSourceConfig {
 
 ## Instrument Validation and Fallback
 
-Instrument validation and fallback resolution happen at `stream()` creation time (not in `validate()`). The flow is:
+The flow is:
 
-1. `validate()` checks structural fields (non-empty exchange/region/instrument, known exchange/region, `data_kind` not empty, no conflicting `max_level`/`max_level_pct`).
-2. `stream()` then calls `validate_with_fallback()`, which makes a REST API call to the exchange to confirm the instrument actually exists.
-3. If the primary instrument is rejected, fallback mappings generate candidate variants (see below) and each is tried until one is accepted.
-4. If no variant succeeds, `stream()` returns `IngestError::Config`.
+1. `stream()` then calls `validate_with_fallback()`, which makes a REST API call to the exchange to confirm the instrument actually exists.
+2. If the primary instrument is rejected, fallback mappings generate candidate variants (see below) and each is tried until one is accepted.
+3. If no variant succeeds, `stream()` returns `IngestError::Config`.
 
 ### Fallback Mappings
 
