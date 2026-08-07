@@ -230,22 +230,27 @@ impl OrderBook {
         let bid_best = self.best_bid();
         let ask_best = self.best_ask();
 
+        let initial_bids = self.num_bids();
+        let mut bids_included = 0usize;
         ob.bids.retain(|level| {
             if level.len() >= 2 {
                 if let (Ok(price), Ok(amount)) = (level[0].parse::<f64>(), level[1].parse::<f64>())
                 {
-                    let side_is_bid = true;
-                    let current_levels = self.num_bids();
+                    let current_levels = initial_bids + bids_included;
                     let price_exists = self.bids.contains_key(&Reverse(OrderedFloat(price)));
-                    filter.should_include(
+                    let include = filter.should_include(
                         bid_best,
                         ask_best,
                         price,
                         amount,
-                        side_is_bid,
+                        true,
                         current_levels,
                         price_exists,
-                    )
+                    );
+                    if include {
+                        bids_included += 1;
+                    }
+                    include
                 } else {
                     true
                 }
@@ -254,22 +259,27 @@ impl OrderBook {
             }
         });
 
+        let initial_asks = self.num_asks();
+        let mut asks_included = 0usize;
         ob.asks.retain(|level| {
             if level.len() >= 2 {
                 if let (Ok(price), Ok(amount)) = (level[0].parse::<f64>(), level[1].parse::<f64>())
                 {
-                    let side_is_bid = false;
-                    let current_levels = self.num_asks();
+                    let current_levels = initial_asks + asks_included;
                     let price_exists = self.asks.contains_key(&OrderedFloat(price));
-                    filter.should_include(
+                    let include = filter.should_include(
                         bid_best,
                         ask_best,
                         price,
                         amount,
-                        side_is_bid,
+                        false,
                         current_levels,
                         price_exists,
-                    )
+                    );
+                    if include {
+                        asks_included += 1;
+                    }
+                    include
                 } else {
                     true
                 }
@@ -545,5 +555,154 @@ mod tests {
         assert_eq!(asks.len(), 2);
         assert!((asks[0].0 - 101.0).abs() < f64::EPSILON);
         assert!((asks[1].0 - 101.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_filter_orderbook_batch_respects_max_level() {
+        let filter = LobFilter::MaxLevel(3);
+        let book = OrderBook::new();
+
+        let ob = OrderBookData {
+            bids: vec![
+                ["100.0".into(), "1.0".into()],
+                ["99.0".into(), "2.0".into()],
+                ["98.0".into(), "3.0".into()],
+                ["97.0".into(), "4.0".into()],
+                ["96.0".into(), "5.0".into()],
+            ],
+            asks: vec![],
+            timestamp: "0".to_string(),
+            microtimestamp: "0".to_string(),
+        };
+
+        let filtered = book.filter_orderbook(ob, &filter);
+        assert_eq!(
+            filtered.bids.len(),
+            3,
+            "batch filter should respect max_level"
+        );
+        assert!((filtered.bids[0][0].parse::<f64>().unwrap() - 100.0).abs() < f64::EPSILON);
+        assert!((filtered.bids[1][0].parse::<f64>().unwrap() - 99.0).abs() < f64::EPSILON);
+        assert!((filtered.bids[2][0].parse::<f64>().unwrap() - 98.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_filter_orderbook_batch_respects_max_level_asks() {
+        let filter = LobFilter::MaxLevel(2);
+        let book = OrderBook::new();
+
+        let ob = OrderBookData {
+            bids: vec![],
+            asks: vec![
+                ["101.0".into(), "1.0".into()],
+                ["102.0".into(), "2.0".into()],
+                ["103.0".into(), "3.0".into()],
+                ["104.0".into(), "4.0".into()],
+            ],
+            timestamp: "0".to_string(),
+            microtimestamp: "0".to_string(),
+        };
+
+        let filtered = book.filter_orderbook(ob, &filter);
+        assert_eq!(
+            filtered.asks.len(),
+            2,
+            "batch filter should respect max_level for asks"
+        );
+        assert!((filtered.asks[0][0].parse::<f64>().unwrap() - 101.0).abs() < f64::EPSILON);
+        assert!((filtered.asks[1][0].parse::<f64>().unwrap() - 102.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_filter_orderbook_existing_price_always_included() {
+        let filter = LobFilter::MaxLevel(1);
+        let mut book = OrderBook::new();
+        let ob = OrderBookData {
+            bids: vec![["100.0".into(), "1.0".into()]],
+            asks: vec![],
+            timestamp: "0".to_string(),
+            microtimestamp: "0".to_string(),
+        };
+        book.apply_orderbook(&ob);
+        assert_eq!(book.num_bids(), 1);
+
+        let ob2 = OrderBookData {
+            bids: vec![
+                ["100.0".into(), "5.0".into()],
+                ["99.0".into(), "2.0".into()],
+            ],
+            asks: vec![],
+            timestamp: "0".to_string(),
+            microtimestamp: "0".to_string(),
+        };
+
+        let filtered = book.filter_orderbook(ob2, &filter);
+        assert_eq!(filtered.bids.len(), 1);
+        assert!((filtered.bids[0][0].parse::<f64>().unwrap() - 100.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_filter_orderbook_with_existing_levels_respects_max_level() {
+        let filter = LobFilter::MaxLevel(2);
+        let mut book = OrderBook::new();
+        let ob = OrderBookData {
+            bids: vec![["100.0".into(), "1.0".into()]],
+            asks: vec![],
+            timestamp: "0".to_string(),
+            microtimestamp: "0".to_string(),
+        };
+        book.apply_orderbook(&ob);
+        assert_eq!(book.num_bids(), 1);
+
+        let ob2 = OrderBookData {
+            bids: vec![
+                ["99.0".into(), "2.0".into()],
+                ["98.0".into(), "3.0".into()],
+                ["97.0".into(), "4.0".into()],
+            ],
+            asks: vec![],
+            timestamp: "0".to_string(),
+            microtimestamp: "0".to_string(),
+        };
+
+        let filtered = book.filter_orderbook(ob2, &filter);
+        assert_eq!(
+            filtered.bids.len(),
+            1,
+            "only 1 new level fits within max_level=2 (1 existing + 1 new)"
+        );
+        assert!((filtered.bids[0][0].parse::<f64>().unwrap() - 99.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_filter_orderbook_existing_price_in_updates_included_always() {
+        let filter = LobFilter::MaxLevel(1);
+        let mut book = OrderBook::new();
+        let ob = OrderBookData {
+            bids: vec![["100.0".into(), "1.0".into()]],
+            asks: vec![],
+            timestamp: "0".to_string(),
+            microtimestamp: "0".to_string(),
+        };
+        book.apply_orderbook(&ob);
+        assert_eq!(book.num_bids(), 1);
+
+        let ob2 = OrderBookData {
+            bids: vec![
+                ["100.0".into(), "5.0".into()],
+                ["99.0".into(), "2.0".into()],
+            ],
+            asks: vec![],
+            timestamp: "0".to_string(),
+            microtimestamp: "0".to_string(),
+        };
+
+        let filtered = book.filter_orderbook(ob2, &filter);
+        assert_eq!(
+            filtered.bids.len(),
+            1,
+            "existing price should always be included in updates"
+        );
+        assert!((filtered.bids[0][0].parse::<f64>().unwrap() - 100.0).abs() < f64::EPSILON);
     }
 }

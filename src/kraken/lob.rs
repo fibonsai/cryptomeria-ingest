@@ -249,22 +249,25 @@ impl OrderBook {
         side: Side,
         filter: &LobFilter,
     ) -> Vec<PriceLevel> {
+        let best_bid = self.best_bid();
+        let best_ask = self.best_ask();
+        let side_is_bid = side == Side::Bid;
+        let initial_levels_on_side = match side {
+            Side::Bid => self.num_bids(),
+            Side::Ask => self.num_asks(),
+        };
+        let mut included_in_batch = 0usize;
+
         levels
             .iter()
             .copied()
             .filter(|&(price, amount)| {
-                let best_bid = self.best_bid();
-                let best_ask = self.best_ask();
-                let side_is_bid = side == Side::Bid;
-                let current_levels_on_side = match side {
-                    Side::Bid => self.num_bids(),
-                    Side::Ask => self.num_asks(),
-                };
                 let price_exists = match side {
                     Side::Bid => self.bids.contains_key(&Reverse(OrderedFloat(price))),
                     Side::Ask => self.asks.contains_key(&OrderedFloat(price)),
                 };
-                filter.should_include(
+                let current_levels_on_side = initial_levels_on_side + included_in_batch;
+                let include = filter.should_include(
                     best_bid,
                     best_ask,
                     price,
@@ -272,7 +275,11 @@ impl OrderBook {
                     side_is_bid,
                     current_levels_on_side,
                     price_exists,
-                )
+                );
+                if include {
+                    included_in_batch += 1;
+                }
+                include
             })
             .collect()
     }
@@ -437,5 +444,97 @@ mod tests {
         book.process_msg(&msg, None);
         assert_eq!(book.num_bids(), 2);
         assert_eq!(book.num_asks(), 1);
+    }
+
+    #[test]
+    fn test_filter_levels_batch_respects_max_level() {
+        let filter = LobFilter::MaxLevel(3);
+        let book = OrderBook::new();
+
+        let updates = vec![
+            (50000.0, 1.0),
+            (49900.0, 2.0),
+            (49800.0, 3.0),
+            (49700.0, 4.0),
+            (49600.0, 5.0),
+        ];
+
+        let filtered = book.filter_levels(&updates, Side::Bid, &filter);
+        assert_eq!(filtered.len(), 3, "batch filter should respect max_level");
+        assert!((filtered[0].0 - 50000.0).abs() < f64::EPSILON);
+        assert!((filtered[1].0 - 49900.0).abs() < f64::EPSILON);
+        assert!((filtered[2].0 - 49800.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_filter_levels_batch_respects_max_level_asks() {
+        let filter = LobFilter::MaxLevel(2);
+        let book = OrderBook::new();
+
+        let updates = vec![
+            (50100.0, 1.0),
+            (50200.0, 2.0),
+            (50300.0, 3.0),
+            (50400.0, 4.0),
+        ];
+
+        let filtered = book.filter_levels(&updates, Side::Ask, &filter);
+        assert_eq!(
+            filtered.len(),
+            2,
+            "batch filter should respect max_level for asks"
+        );
+        assert!((filtered[0].0 - 50100.0).abs() < f64::EPSILON);
+        assert!((filtered[1].0 - 50200.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_filter_levels_existing_price_always_included() {
+        let filter = LobFilter::MaxLevel(1);
+        let mut book = OrderBook::new();
+        book.apply_snapshot(&[(50000.0, 1.0)], Side::Bid);
+        assert_eq!(book.num_bids(), 1);
+
+        let updates = vec![(50000.0, 5.0), (49900.0, 2.0)];
+
+        let filtered = book.filter_levels(&updates, Side::Bid, &filter);
+        assert_eq!(filtered.len(), 1);
+        assert!((filtered[0].0 - 50000.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_filter_levels_with_existing_levels_respects_max_level() {
+        let filter = LobFilter::MaxLevel(2);
+        let mut book = OrderBook::new();
+        book.apply_snapshot(&[(50000.0, 1.0)], Side::Bid);
+        assert_eq!(book.num_bids(), 1);
+
+        let updates = vec![(49900.0, 2.0), (49800.0, 3.0), (49700.0, 4.0)];
+
+        let filtered = book.filter_levels(&updates, Side::Bid, &filter);
+        assert_eq!(
+            filtered.len(),
+            1,
+            "only 1 new level fits within max_level=2 (1 existing + 1 new)"
+        );
+        assert!((filtered[0].0 - 49900.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_filter_levels_existing_price_in_updates_included_always() {
+        let filter = LobFilter::MaxLevel(1);
+        let mut book = OrderBook::new();
+        book.apply_snapshot(&[(50000.0, 1.0)], Side::Bid);
+        assert_eq!(book.num_bids(), 1);
+
+        let updates = vec![(50000.0, 5.0), (49900.0, 2.0)];
+
+        let filtered = book.filter_levels(&updates, Side::Bid, &filter);
+        assert_eq!(
+            filtered.len(),
+            1,
+            "existing price should always be included in updates"
+        );
+        assert!((filtered[0].0 - 50000.0).abs() < f64::EPSILON);
     }
 }
