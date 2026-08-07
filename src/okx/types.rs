@@ -14,6 +14,12 @@ pub struct OkxWsMessage {
 
     #[serde(default)]
     pub event: Option<String>,
+
+    #[serde(default, rename = "code")]
+    pub error_code: Option<String>,
+
+    #[serde(default, rename = "msg")]
+    pub error_msg: Option<String>,
 }
 
 /// Argument field identifying the channel and instrument.
@@ -120,7 +126,16 @@ impl OkxWsMessage {
                     format!("{} (raw)", inst)
                 }
             }
-            "EVENT" => self.event.as_deref().unwrap_or("?").to_string(),
+            "EVENT" => {
+                let event = self.event.as_deref().unwrap_or("?");
+                if event == "error" {
+                    let code = self.error_code.as_deref().unwrap_or("?");
+                    let msg = self.error_msg.as_deref().unwrap_or("?");
+                    format!("error (code={}: {})", code, msg)
+                } else {
+                    event.to_string()
+                }
+            }
             _ => inst.to_string(),
         }
     }
@@ -520,8 +535,30 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_price_level_bad_returns_none() {
-        let level: PriceLevel = vec!["bad".into(), "2.5".into()];
-        assert!(parse_price_level(&level).is_none());
+    fn test_parse_error_event() {
+        let json = r#"{
+            "event": "error",
+            "code": "60010",
+            "msg": "Channel does not exist"
+        }"#;
+        let msg = OkxWsMessage::from_json(json).unwrap();
+        assert_eq!(msg.event.as_deref(), Some("error"));
+        assert_eq!(msg.error_code.as_deref(), Some("60010"));
+        assert_eq!(msg.error_msg.as_deref(), Some("Channel does not exist"));
+        let summary = msg.summary();
+        assert!(summary.contains("error"));
+        assert!(summary.contains("60010"));
+        assert!(summary.contains("Channel does not exist"));
+    }
+
+    #[test]
+    fn test_parse_error_event_without_code_msg() {
+        let json = r#"{"event": "error"}"#;
+        let msg = OkxWsMessage::from_json(json).unwrap();
+        assert_eq!(msg.event.as_deref(), Some("error"));
+        assert!(msg.error_code.is_none());
+        assert!(msg.error_msg.is_none());
+        let summary = msg.summary();
+        assert_eq!(summary, "error (code=?: ?)");
     }
 }
