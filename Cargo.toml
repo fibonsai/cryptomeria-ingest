@@ -15,7 +15,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ordered-float = "4"
 rand = "0.8"
-log = "0.4"
 rasant = "1.1"
 chrono = "0.4"
 reqwest = { version = "0.13.4", features = ["json"] }

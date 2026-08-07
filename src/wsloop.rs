@@ -1,6 +1,7 @@
 use crate::items::{IngestError, MarketDataItem};
-use crate::logging;
+use crate::logger::logger as log;
 use futures_util::{SinkExt, Stream, StreamExt, stream};
+use rasant::Level;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -127,9 +128,9 @@ where
             let ws_stream = match tokio_tungstenite::connect_async(&url).await {
                 Ok((stream, _)) => stream,
                 Err(e) => {
-                    logging::error(
-                        "WS connect failed",
-                        &format!("instrument={instrument} url={url} error={e}"),
+                    log().lock().unwrap().log(
+                        Level::Error,
+                        &format!("[WS connect failed] instrument={instrument} url={url} error={e}"),
                     );
                     attempt += 1;
                     if let Some(max) = max_attempts
@@ -142,9 +143,9 @@ where
                     continue;
                 }
             };
-            logging::info(
-                "WS connected",
-                &format!("instrument={instrument} url={url}"),
+            log().lock().unwrap().log(
+                Level::Info,
+                &format!("[WS connected] instrument={instrument} url={url}"),
             );
 
             // Split into sender and receiver.
@@ -153,9 +154,9 @@ where
             // Send subscription messages.
             for msg in adapter.subscribe_msgs() {
                 if let Err(e) = write.send(Message::Text(msg)).await {
-                    logging::error(
-                        "WS subscribe failed",
-                        &format!("instrument={instrument} error={e}"),
+                    log().lock().unwrap().log(
+                        Level::Error,
+                        &format!("[WS subscribe failed] instrument={instrument} error={e}"),
                     );
                     attempt += 1;
                     if let Some(max) = max_attempts
@@ -196,19 +197,19 @@ where
                                         }
                                     }
                                     Err(e) => {
-                                        logging::warn(
-                                            "Failed to parse WS message",
-                                            &format!("instrument={instrument} text={text} error={e}"),
+                                        log().lock().unwrap().log(
+                                            Level::Warning,
+                                            &format!("[Failed to parse WS message] instrument={instrument} text={text} error={e}"),
                                         );
                                         // Continue; don't break the connection on parse errors.
                                     }
                                 }
                             }
                             Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(_))) => {
-                                logging::debug("Unexpected binary message", &format!("instrument={instrument}"));
+                                log().lock().unwrap().log(Level::Debug, &format!("[Unexpected binary message] instrument={instrument}"));
                             }
                             Some(Ok(tokio_tungstenite::tungstenite::Message::Frame(_))) => {
-                                logging::debug("Unexpected raw frame", &format!("instrument={instrument}"));
+                                log().lock().unwrap().log(Level::Debug, &format!("[Unexpected raw frame] instrument={instrument}"));
                             }
                             Some(Ok(tokio_tungstenite::tungstenite::Message::Ping(_))) => {
                                 // tungstenite handles ping/pong automatically at the ws level.
@@ -217,25 +218,25 @@ where
                                 // pong
                             }
                             Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))) => {
-                                logging::info("WS received close frame", &format!("instrument={instrument}"));
+                                log().lock().unwrap().log(Level::Info, &format!("[WS received close frame] instrument={instrument}"));
                                 break 'read;
                             }
                             Some(Err(e)) => {
-                                logging::error("WS read error", &format!("instrument={instrument} error={e}"));
+                                log().lock().unwrap().log(Level::Error, &format!("[WS read error] instrument={instrument} error={e}"));
                                 break 'read;
                             }
                             None => {
                                 // Stream ended.
-                                logging::info("WS stream ended", &format!("instrument={instrument}"));
+                                log().lock().unwrap().log(Level::Info, &format!("[WS stream ended] instrument={instrument}"));
                                 break 'read;
                             }
                         }
                     }
                     // Check if the sender channel is closed (receiver dropped).
                     _ = tx.closed() => {
-                        logging::info(
-                            "Receiver dropped, shutting down",
-                            &format!("instrument={instrument}"),
+                        log().lock().unwrap().log(
+                            Level::Info,
+                            &format!("[Receiver dropped, shutting down] instrument={instrument}"),
                         );
                         break 'read;
                     }

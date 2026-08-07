@@ -30,7 +30,7 @@ Multi-exchange crypto market data ingestion library (OKX, Kraken, Bitstamp) that
 ## Project Structure
 - `src/lib.rs` - Main library exports
 - `src/bin/demo.rs` - Example usage
-- `src/*` - Library modules (config, items, stream, traits, urls, logging, wsloop)
+- `src/*` - Library modules (config, items, stream, traits, urls, logger, wsloop)
 - `src/okx/`, `src/kraken/`, `src/bitstamp/` - Exchange-specific implementations
 - `tests/` - Integration tests for each exchange
 
