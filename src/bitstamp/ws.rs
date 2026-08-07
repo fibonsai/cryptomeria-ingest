@@ -153,6 +153,7 @@ impl ExchangeAdapter for BitstampAdapter {
     }
 
     fn handle_message(&mut self, msg: &Self::Message) -> Option<MarketDataItem> {
+        let mut logger = log().lock().unwrap();
         match msg.message_type() {
             MessageType::L2Snapshot | MessageType::L2Update => {
                 let ts = msg.timestamp_ms().unwrap_or_else(|| {
@@ -189,22 +190,16 @@ impl ExchangeAdapter for BitstampAdapter {
                         seq_id: None,
                     }))
                 } else {
-                    log()
-                        .lock()
-                        .unwrap()
-                        .log(Level::Warning, "[bitstamp] failed to parse trade data");
+                    logger.log(Level::Warning, "[bitstamp] failed to parse trade data");
                     None
                 }
             }
             MessageType::Event => {
-                log()
-                    .lock()
-                    .unwrap()
-                    .log(Level::Info, &format!("[bitstamp] event: {}", msg.summary()));
+                logger.log(Level::Info, &format!("[bitstamp] event: {}", msg.summary()));
                 None
             }
             MessageType::Unknown => {
-                log().lock().unwrap().log(
+                logger.log(
                     Level::Warning,
                     &format!("[bitstamp] unknown message: {}", msg.summary()),
                 );
