@@ -180,6 +180,7 @@ Items serialize with lowercase variant keys and an `exchange` field; LOB levels 
 ```rust
 let config = DataSourceConfig {
     exchange: "okx".into(),
+    region: "global".into(),
     instrument: "BTC-USDT".into(),
     data_kind: DataKind::LOB,
     ..Default::default()
@@ -191,6 +192,7 @@ let config = DataSourceConfig {
 ```rust
 let config = DataSourceConfig {
     exchange: "kraken".into(),
+    region: "global".into(),
     instrument: "XBT/USD".into(),
     data_kind: DataKind::TRADE,
     ..Default::default()
@@ -202,6 +204,7 @@ let config = DataSourceConfig {
 ```rust
 let config = DataSourceConfig {
     exchange: "bitstamp".into(),
+    region: "global".into(),
     instrument: "BTC/USD".into(),
     data_kind: DataKind::LOB | DataKind::TRADE,
     ..Default::default()
@@ -213,6 +216,7 @@ let config = DataSourceConfig {
 ```rust
 let config = DataSourceConfig {
     exchange: "okx".into(),
+    region: "global".into(),
     instrument: "ETH-USDT".into(),
     data_kind: DataKind::LOB,
     max_level: Some(20),
@@ -225,6 +229,7 @@ let config = DataSourceConfig {
 ```rust
 let config = DataSourceConfig {
     exchange: "kraken".into(),
+    region: "global".into(),
     instrument: "XBT/USD".into(),
     data_kind: DataKind::LOB,
     max_level_pct: 0.5,
@@ -237,6 +242,7 @@ let config = DataSourceConfig {
 ```rust
 let config = DataSourceConfig {
     exchange: "okx".into(),
+    region: "global".into(),
     instrument: "BTC-USDT".into(),
     data_kind: DataKind::LOB,
     resilience: ResilienceConfig {
@@ -255,6 +261,7 @@ let config = DataSourceConfig {
 ```rust
 let config = DataSourceConfig {
     exchange: "kraken".into(),
+    region: "global".into(),
     instrument: "XBT/USD".into(),
     data_kind: DataKind::LOB,
     resilience: ResilienceConfig {
@@ -270,6 +277,7 @@ let config = DataSourceConfig {
 ```rust
 let config = DataSourceConfig {
     exchange: "bitstamp".into(),
+    region: "global".into(),
     instrument: "ETH/USD".into(),
     data_kind: DataKind::LOB,
     resilience: ResilienceConfig {
@@ -278,6 +286,56 @@ let config = DataSourceConfig {
     },
     ..Default::default()
 };
+```
+
+## Instrument Validation and Fallback
+
+Instrument validation and fallback resolution happen at `stream()` creation time (not in `validate()`). The flow is:
+
+1. `validate()` checks structural fields (non-empty exchange/region/instrument, known exchange/region, `data_kind` not empty, no conflicting `max_level`/`max_level_pct`).
+2. `stream()` then calls `validate_with_fallback()`, which makes a REST API call to the exchange to confirm the instrument actually exists.
+3. If the primary instrument is rejected, fallback mappings generate candidate variants (see below) and each is tried until one is accepted.
+4. If no variant succeeds, `stream()` returns `IngestError::Config`.
+
+### Fallback Mappings
+
+To handle cross-exchange symbol differences automatically, provide a `fallback` mapping keyed by exchange name. When the primary instrument fails exchange validation, the library generates variants by applying `case_fallback` to the original instrument first, then by a cartesian product of `base_mappings` × `quote_mappings` × `separator_mappings`. Each variant is tried (in order) against the exchange until one is accepted.
+
+**Example with fallback:**
+```rust
+use std::collections::HashMap;
+use cryptomeria_ingest::{DataSourceConfig, ExchangeFallbackMapping, CaseFallback};
+
+let mut fallbacks = HashMap::new();
+fallbacks.insert("okx".to_string(), ExchangeFallbackMapping {
+    base_mappings: vec!["BTC".into(), "XBT".into()],
+    quote_mappings: vec!["USDT".into(), "USD".into()],
+    separator_mappings: vec!["-".into(), "/".into()],
+    case_fallback: CaseFallback::Upper,
+});
+
+let config = DataSourceConfig {
+    exchange: "okx".into(),
+    region: "global".into(),
+    instrument: "btc/usdt".into(), // First tried as "BTC/USDT", then "BTC-USDT", etc.
+    fallback: fallbacks,
+    data_kind: DataKind::LOB,
+    ..Default::default()
+};
+```
+
+> The first fallback variant is the original instrument with `case_fallback` applied (e.g. `"btc/usdt"` → `"BTC/USDT"`). Only if that fails does the library try the cartesian-product combinations like `"BTC-USDT"`, `"BTC/USD"`, `"XBT-USDT"`, etc.
+
+**Validation error at stream time:**
+```rust
+let config = DataSourceConfig {
+    exchange: "okx".into(),
+    region: "global".into(),
+    instrument: "NOT-A-REAL-PAIR".into(), // Not recognized by OKX
+    data_kind: DataKind::LOB,
+    ..Default::default()
+};
+// stream(config).await returns Err(IngestError::Config(...)) at runtime
 ```
 
 ## Running the Demo Binary
