@@ -167,6 +167,13 @@ pub struct DataSourceConfig {
     pub region: String,
     /// Instrument symbol in exchange-native format.
     pub instrument: String,
+    /// Optional alias used to select a per-exchange fallback mapping. When the
+    /// primary instrument fails validation, the library looks up the fallback
+    /// rule set under `fallback[exchange][alias]`. For backward compatibility,
+    /// if `alias` is `None` or absent the exchange-only rule under
+    /// `fallback[exchange][""]` is used.
+    #[serde(default)]
+    pub alias: Option<String>,
     /// Data kinds to subscribe to (set semantics: Lob, Trade, Lob|Trade).
     pub data_kind: DataKind,
     /// Maximum number of price levels per side (None = no limit).
@@ -180,10 +187,12 @@ pub struct DataSourceConfig {
     /// Reconnection/backoff settings.
     #[serde(default)]
     pub resilience: ResilienceConfig,
-    /// Per-exchange fallback mappings (only used by demo app config file).
-    /// Key is exchange name ("okx", "kraken", "bitstamp").
+    /// Per-exchange fallback mappings, keyed by exchange name ("okx",
+    /// "kraken", "bitstamp") and then by instrument alias. The alias matches
+    /// `DataSourceConfig.alias`; the empty-string alias (`""`) is the
+    /// exchange-only fallback shared by all instruments when no alias matches.
     #[serde(default)]
-    pub fallback: HashMap<String, ExchangeFallbackMapping>,
+    pub fallback: HashMap<String, HashMap<String, ExchangeFallbackMapping>>,
 }
 
 fn default_snapshot_depth() -> usize {
@@ -265,6 +274,7 @@ impl Default for DataSourceConfig {
             exchange: String::new(),
             region: String::new(),
             instrument: String::new(),
+            alias: None,
             data_kind: DataKind::empty(),
             max_level: None,
             max_level_pct: 0.0,

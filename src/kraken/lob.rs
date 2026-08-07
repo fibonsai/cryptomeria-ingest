@@ -366,7 +366,7 @@ mod tests {
 
     #[test]
     fn test_new_book_empty() {
-        let mut book = OrderBook::new();
+        let book = OrderBook::new();
         assert_eq!(book.num_bids(), 0);
         assert_eq!(book.num_asks(), 0);
     }
@@ -485,7 +485,11 @@ mod tests {
 
         let filtered = book.filter_levels(&updates, Side::Ask, &filter);
         // Should only include first 2 levels (max_level=2)
-        assert_eq!(filtered.len(), 2, "batch filter should respect max_level for asks");
+        assert_eq!(
+            filtered.len(),
+            2,
+            "batch filter should respect max_level for asks"
+        );
         // Verify it's the best 2 prices (lowest for asks)
         assert!((filtered[0].0 - 50100.0).abs() < f64::EPSILON);
         assert!((filtered[1].0 - 50200.0).abs() < f64::EPSILON);
