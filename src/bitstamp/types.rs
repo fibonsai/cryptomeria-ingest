@@ -245,7 +245,18 @@ impl BitstampWsMessage {
                     format!("{} (raw)", self.channel.as_deref().unwrap_or("?"))
                 }
             }
-            MessageType::Event => self.event.as_deref().unwrap_or("?").to_string(),
+            MessageType::Event => {
+                let event = self.event.as_deref().unwrap_or("?");
+                // Check if this is an error event and extract errorMessage from data
+                if event == "error"
+                    && let Some(ref data) = self.data
+                    && let Some(msg) = data.get("errorMessage").and_then(|v| v.as_str())
+                {
+                    format!("error: {}", msg)
+                } else {
+                    event.to_string()
+                }
+            }
             MessageType::Unknown => self.channel.as_deref().unwrap_or("?").to_string(),
         }
     }
@@ -671,5 +682,28 @@ mod tests {
             sell_order_id: 0,
         };
         assert_eq!(td.timestamp_ms(), Some(1705314600123));
+    }
+
+    #[test]
+    fn test_parse_error_event() {
+        let json = r#"{
+            "event": "error",
+            "channel": "live_trades_btcusd",
+            "data": {"errorMessage": "Channel not found"}
+        }"#;
+        let msg = BitstampWsMessage::from_json(json).unwrap();
+        assert_eq!(msg.event.as_deref(), Some("error"));
+        let summary = msg.summary();
+        assert!(summary.contains("error"));
+        assert!(summary.contains("Channel not found"));
+    }
+
+    #[test]
+    fn test_parse_error_event_without_message() {
+        let json = r#"{"event": "error", "channel": "live_trades_btcusd", "data": {}}"#;
+        let msg = BitstampWsMessage::from_json(json).unwrap();
+        assert_eq!(msg.event.as_deref(), Some("error"));
+        let summary = msg.summary();
+        assert_eq!(summary, "error");
     }
 }
