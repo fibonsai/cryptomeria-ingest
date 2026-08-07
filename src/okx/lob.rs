@@ -731,7 +731,6 @@ mod tests {
 
     #[test]
     fn test_zero_amount_passes_parse_level() {
-        // parse_price_level must pass through zero amounts for correct removal
         let level = price_level("100.0", "0.0");
         let result = parse_price_level(&level);
         assert!(result.is_some(), "zero amount should parse");
@@ -770,7 +769,6 @@ mod tests {
 
     #[test]
     fn test_filter_levels_batch_respects_max_level_asks() {
-        // Same test for asks side
         let filter = LobFilter::MaxLevel(2);
         let book = OrderBook::new();
 
@@ -797,15 +795,50 @@ mod tests {
         book.apply_snapshot(&[price_level("100.0", "1.0")], Side::Bid);
         assert_eq!(book.num_bids(), 1);
 
-        // Update existing level + add new level
+        let updates = vec![price_level("100.0", "5.0"), price_level("99.0", "2.0")];
+
+        let filtered = book.filter_levels(&updates, Side::Bid, &filter);
+        assert_eq!(filtered.len(), 1);
+        assert!((filtered[0][0].parse::<f64>().unwrap() - 100.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_filter_levels_with_existing_levels_respects_max_level() {
+        let filter = LobFilter::MaxLevel(2);
+        let mut book = OrderBook::new();
+        book.apply_snapshot(&[price_level("100.0", "1.0")], Side::Bid);
+        assert_eq!(book.num_bids(), 1);
+
         let updates = vec![
-            price_level("100.0", "5.0"), // existing - should be included
-            price_level("99.0", "2.0"),  // new - should be filtered out (max=1, already have 1)
+            price_level("99.0", "2.0"),
+            price_level("98.0", "3.0"),
+            price_level("97.0", "4.0"),
         ];
 
         let filtered = book.filter_levels(&updates, Side::Bid, &filter);
-        // Should include the existing price update, but not the new level
-        assert_eq!(filtered.len(), 1);
+        assert_eq!(
+            filtered.len(),
+            1,
+            "only 1 new level fits within max_level=2 (1 existing + 1 new)"
+        );
+        assert!((filtered[0][0].parse::<f64>().unwrap() - 99.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_filter_levels_existing_price_in_updates_included_always() {
+        let filter = LobFilter::MaxLevel(1);
+        let mut book = OrderBook::new();
+        book.apply_snapshot(&[price_level("100.0", "1.0")], Side::Bid);
+        assert_eq!(book.num_bids(), 1);
+
+        let updates = vec![price_level("100.0", "5.0"), price_level("99.0", "2.0")];
+
+        let filtered = book.filter_levels(&updates, Side::Bid, &filter);
+        assert_eq!(
+            filtered.len(),
+            1,
+            "existing price should always be included in updates"
+        );
         assert!((filtered[0][0].parse::<f64>().unwrap() - 100.0).abs() < f64::EPSILON);
     }
 }

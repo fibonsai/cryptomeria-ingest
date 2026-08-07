@@ -473,7 +473,6 @@ mod tests {
 
     #[test]
     fn test_filter_levels_batch_respects_max_level_asks() {
-        // Same test for asks side
         let filter = LobFilter::MaxLevel(2);
         let book = OrderBook::new();
 
@@ -500,15 +499,46 @@ mod tests {
         book.apply_snapshot(&[(50000.0, 1.0)], Side::Bid);
         assert_eq!(book.num_bids(), 1);
 
-        // Update existing level + add new level
-        let updates = vec![
-            (50000.0, 5.0), // existing - should be included
-            (49900.0, 2.0), // new - should be filtered out (max=1, already have 1)
-        ];
+        let updates = vec![(50000.0, 5.0), (49900.0, 2.0)];
 
         let filtered = book.filter_levels(&updates, Side::Bid, &filter);
-        // Should include the existing price update, but not the new level
         assert_eq!(filtered.len(), 1);
+        assert!((filtered[0].0 - 50000.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_filter_levels_with_existing_levels_respects_max_level() {
+        let filter = LobFilter::MaxLevel(2);
+        let mut book = OrderBook::new();
+        book.apply_snapshot(&[(50000.0, 1.0)], Side::Bid);
+        assert_eq!(book.num_bids(), 1);
+
+        let updates = vec![(49900.0, 2.0), (49800.0, 3.0), (49700.0, 4.0)];
+
+        let filtered = book.filter_levels(&updates, Side::Bid, &filter);
+        assert_eq!(
+            filtered.len(),
+            1,
+            "only 1 new level fits within max_level=2 (1 existing + 1 new)"
+        );
+        assert!((filtered[0].0 - 49900.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_filter_levels_existing_price_in_updates_included_always() {
+        let filter = LobFilter::MaxLevel(1);
+        let mut book = OrderBook::new();
+        book.apply_snapshot(&[(50000.0, 1.0)], Side::Bid);
+        assert_eq!(book.num_bids(), 1);
+
+        let updates = vec![(50000.0, 5.0), (49900.0, 2.0)];
+
+        let filtered = book.filter_levels(&updates, Side::Bid, &filter);
+        assert_eq!(
+            filtered.len(),
+            1,
+            "existing price should always be included in updates"
+        );
         assert!((filtered[0].0 - 50000.0).abs() < f64::EPSILON);
     }
 }

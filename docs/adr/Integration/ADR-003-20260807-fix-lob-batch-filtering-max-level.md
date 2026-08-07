@@ -1,83 +1,98 @@
-# ADR-003: Fix LOB batch filtering to respect max_level configuration
+# ADR-003: Fix LOB Batch Filtering Max Level Constraint
 
-**Category**: Integration  
-**Status**: Accepted  
-**Created**: 2026-08-07 19:30
+## Status
+Proposed (2026-08-07)
 
 ## Context
 
-The `max_level` filter (configured via `LobFilter::MaxLevel`) was not correctly enforced when processing batched price level updates. When a snapshot cleared the order book and a subsequent update added many levels in a single batch, all levels passed the filter because `current_levels_on_side` was computed once before filtering, reflecting the empty book state.
+When processing LOB updates with `max_level` configuration, the order book could exceed the configured limit. The bug manifested when:
 
-This affected all three exchange adapters:
-- `src/okx/lob.rs` - `filter_levels` function
-- `src/kraken/lob.rs` - `filter_levels` function  
-- `src/bitstamp/lob.rs` - `filter_orderbook` function
+1. A trade consumed all levels on one side of the book
+2. An update arrived with many new levels
+3. The filter incorrectly allowed all levels to pass
 
-The bug allowed more price levels than configured, potentially causing memory issues and incorrect market data representation.
+### Example Log
+```
+2026-08-07T18:28:00.943614Z LOB: bids=[], asks=[64829.1:0.28]
+2026-08-07T18:28:01.043637Z LOB: bids=[60 levels...], asks=[64829.1:0.04]
+```
 
-## Options Considered
+The bids should have been limited to `max_level` but showed 60 levels.
 
-### Option 1: Track included levels within batch (chosen)
+## Problem
 
-Add a counter that increments each time a level is included in the filtered result. Compute `current_levels_on_side = initial_levels + included_in_batch` for each level evaluation.
+In the `filter_levels` function, `current_levels_on_side` was computed once at the start of filtering:
 
-Pros:
-- Minimal code change
-- Preserves existing filter logic
-- Works for both bids and asks
-- Existing price updates still always pass (price_exists check)
+```rust
+let current_levels_on_side = match side {
+    Side::Bid => self.num_bids(),
+    Side::Ask => self.num_asks(),
+};
+```
 
-Cons:
-- Requires moving some variables outside the filter closure
+This value never updated for levels accepted within the batch. With `max_level=3` and `current_levels=0`:
 
-### Option 2: Pre-filter and sort batch before applying filter
-
-Sort all levels by price (best first), truncate to max_level, then apply filter.
-
-Pros:
-- Simpler logic conceptually
-- Guarantees correct ordering
-
-Cons:
-- More complex for incremental updates where existing prices must always pass
-- Changes the filtering semantics (snapshot vs update handling)
-
-### Option 3: Apply filter after batch is applied to book
-
-Apply all levels to the book first, then re-filter the entire book.
-
-Pros:
-- Simpler filter logic
-
-Cons:
-- Significant performance impact (re-processing entire book)
-- Breaks snapshot-first stream pattern
-- Could remove levels that were just added
+| Level | price_exists | current | condition | Result |
+|-------|--------------|---------|-----------|--------|
+| L1 | false | 0 | 0<3=true | INCLUDED |
+| L2 | false | 0 | 0<3=true | INCLUDED (BUG: should be 1<3) |
+| L3 | false | 0 | 0<3=true | INCLUDED (BUG: should be 2<3) |
+| L4 | false | 0 | 0<3=true | INCLUDED (BUG: should be 3<3=false) |
 
 ## Decision
 
-Implement Option 1: Track included levels within the batch using a mutable counter (`included_in_batch` for OKX/Kraken, `bids_included`/`asks_included` for Bitstamp).
+Track `included_in_batch` counter and compute `current_levels_on_side` dynamically during iteration:
 
-Key implementation details:
-- Hoist `best_bid`, `best_ask`, `side_is_bid` outside the filter closure
-- Capture `initial_levels_on_side` before filtering
-- For each level, compute `current_levels_on_side = initial_levels_on_side + included_in_batch`
-- Increment `included_in_batch` only when a level is included
-- Preserve existing behavior: existing price levels always pass (`price_exists` check)
+```rust
+let initial_levels_on_side = match side {
+    Side::Bid => self.num_bids(),
+    Side::Ask => self.num_asks(),
+};
+let mut included_in_batch = 0usize;
+
+levels.iter().filter(|level| {
+    let current_levels_on_side = initial_levels_on_side + included_in_batch;
+    let include = filter.should_include(/* ... */);
+    if include {
+        included_in_batch += 1;
+    }
+    include
+})
+```
 
 ## Consequences
 
 ### Positive
-- Correctly enforces `max_level` configuration for batched updates
-- Minimal code changes (~20 lines per exchange)
-- Preserves all existing behavior for existing price updates
-- Adds comprehensive test coverage (3 tests per exchange)
+- `max_level` constraint is correctly enforced
+- All exchanges (OKX, Kraken, Bitstamp) behave consistently
+- Existing prices in updates are always included (correct behavior)
 
 ### Negative
-- Slightly more complex filter closure logic
-- Mutable counter in functional-style filter (acceptable for this use case)
+- Slightly more complex filter logic
+- Counter increment happens inside filter closure
 
-### Neutral
-- No API changes
-- No configuration changes required
-- Existing deployments will automatically get correct behavior
+## Affected APIs
+
+- `src/okx/lob.rs:filter_levels`
+- `src/kraken/lob.rs:filter_levels`
+- `src/bitstamp/lob.rs:filter_orderbook`
+
+## Tests Added
+
+- `test_filter_levels_batch_respects_max_level` - empty book, batch respects limit
+- `test_filter_levels_batch_respects_max_level_asks` - same for asks side
+- `test_filter_levels_existing_price_always_included` - existing prices pass filter
+- `test_filter_levels_with_existing_levels_respects_max_level` - counts existing levels
+- `test_filter_levels_existing_price_in_updates_included_always` - updates with existing prices
+
+## Alternatives Considered
+
+1. **Filter at output time in `normalize_lob`** - Would require changing the output path; current approach fixes the root cause in the filtering logic.
+
+2. **Use `retain` with external counter** - Similar complexity; current approach is clearer with local counter.
+
+3. **Sort and truncate after filtering** - Would lose the ability to prioritize existing price updates.
+
+## Related Issues
+
+- Issue #26 - LOB batch filtering bug
