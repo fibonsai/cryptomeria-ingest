@@ -1,5 +1,6 @@
+use crate::items::{LobItem, LobLevel};
 use crate::kraken::types::KrakenWsMessage;
-use crate::traits::{LevelsWithinPct, LobFilter, OrderBook as OrderBookTrait};
+use crate::traits::{LevelsWithinPct, OrderBook as OrderBookTrait};
 use ordered_float::OrderedFloat;
 use serde_json::Value;
 use std::cmp::Reverse;
@@ -146,7 +147,7 @@ impl OrderBook {
         }
     }
 
-    pub fn process_msg(&mut self, msg: &KrakenWsMessage, filter: Option<&LobFilter>) {
+    pub fn process_msg(&mut self, msg: &KrakenWsMessage) {
         let data = match msg.data.first() {
             Some(d) => d,
             None => return,
@@ -159,14 +160,6 @@ impl OrderBook {
             if levels.is_empty() {
                 continue;
             }
-            let levels = match action {
-                "snapshot" if filter.is_some() => {
-                    let best_price = Self::find_best_price(&levels, side);
-                    self.filter_snapshot_levels(&levels, side, filter.unwrap(), best_price)
-                }
-                _ if let Some(f) = filter => self.filter_levels(&levels, side, f),
-                _ => levels,
-            };
             if !levels.is_empty() {
                 match action {
                     "snapshot" => self.apply_snapshot(&levels, side),
@@ -176,115 +169,7 @@ impl OrderBook {
             }
         }
     }
-
-    /// Find the best (closest to market) price from a batch of levels.
-    fn find_best_price(levels: &[PriceLevel], side: Side) -> Option<f64> {
-        let mut best: Option<f64> = None;
-        for &(price, _) in levels {
-            match side {
-                Side::Bid if best.is_none_or(|b| price > b) => best = Some(price),
-                Side::Ask if best.is_none_or(|b| price < b) => best = Some(price),
-                _ => {}
-            }
-        }
-        best
-    }
-
-    fn filter_snapshot_levels(
-        &self,
-        levels: &[PriceLevel],
-        side: Side,
-        filter: &LobFilter,
-        batch_best: Option<f64>,
-    ) -> Vec<PriceLevel> {
-        match filter {
-            LobFilter::MaxLevelPct(_pct) => {
-                let best_bid = if side == Side::Bid {
-                    batch_best
-                } else {
-                    self.best_bid()
-                };
-                let best_ask = if side == Side::Ask {
-                    batch_best
-                } else {
-                    self.best_ask()
-                };
-                levels
-                    .iter()
-                    .copied()
-                    .filter(|&(price, amount)| {
-                        filter.should_include(
-                            best_bid,
-                            best_ask,
-                            price,
-                            amount,
-                            side == Side::Bid,
-                            0,
-                            false,
-                        )
-                    })
-                    .collect()
-            }
-            LobFilter::MaxLevel(max) => {
-                let mut parsed: Vec<PriceLevel> = levels
-                    .iter()
-                    .filter(|&&(_, amount)| amount > 0.0)
-                    .copied()
-                    .collect();
-                match side {
-                    Side::Bid => parsed
-                        .sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)),
-                    Side::Ask => parsed
-                        .sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal)),
-                }
-                parsed.truncate(*max);
-                parsed
-            }
-        }
-    }
-
-    fn filter_levels(
-        &self,
-        levels: &[PriceLevel],
-        side: Side,
-        filter: &LobFilter,
-    ) -> Vec<PriceLevel> {
-        let best_bid = self.best_bid();
-        let best_ask = self.best_ask();
-        let side_is_bid = side == Side::Bid;
-        let initial_levels_on_side = match side {
-            Side::Bid => self.num_bids(),
-            Side::Ask => self.num_asks(),
-        };
-        let mut included_in_batch = 0usize;
-
-        levels
-            .iter()
-            .copied()
-            .filter(|&(price, amount)| {
-                let price_exists = match side {
-                    Side::Bid => self.bids.contains_key(&Reverse(OrderedFloat(price))),
-                    Side::Ask => self.asks.contains_key(&OrderedFloat(price)),
-                };
-                let current_levels_on_side = initial_levels_on_side + included_in_batch;
-                let include = filter.should_include(
-                    best_bid,
-                    best_ask,
-                    price,
-                    amount,
-                    side_is_bid,
-                    current_levels_on_side,
-                    price_exists,
-                );
-                if include {
-                    included_in_batch += 1;
-                }
-                include
-            })
-            .collect()
-    }
-
-    pub fn total_bid_size(&self) -> f64 {
+    fn total_bid_size(&self) -> f64 {
         self.bids.values().sum()
     }
 
@@ -315,6 +200,113 @@ impl OrderBook {
             .collect();
 
         formatted.join(", ")
+    }
+
+    /// Create a LobItem with post-filtering applied.
+    ///
+    /// Applies max_level and max_level_pct filters, sorts bids ascending (worst to best,
+    /// so best_bid is last element) and asks ascending (best to worst, so best_ask is first element).
+    pub fn to_lob_item(
+        &self,
+        ts: u64,
+        exchange: &str,
+        max_level: Option<usize>,
+        max_level_pct: f64,
+    ) -> Option<LobItem> {
+        if self.bids.is_empty() || self.asks.is_empty() {
+            return None;
+        }
+
+        let bid_best = self.best_bid();
+        let ask_best = self.best_ask();
+
+        // Filter and sort bids: ascending (worst to best), so best_bid is last
+        let mut bids: Vec<LobLevel> = self
+            .bids
+            .iter()
+            .filter_map(|(k, v)| {
+                let price = k.0.0;
+                let amount = *v;
+                if amount == 0.0 {
+                    return None;
+                }
+                // Apply max_level_pct filter
+                if max_level_pct > 0.0
+                    && let Some(best) = bid_best
+                    && price < best * (1.0 - max_level_pct / 100.0)
+                {
+                    return None;
+                }
+                Some(LobLevel {
+                    price,
+                    size: amount,
+                })
+            })
+            .collect();
+
+        // Sort bids ascending (worst to best) so best_bid is last
+        bids.sort_by(|a, b| {
+            a.price
+                .partial_cmp(&b.price)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // Apply max_level filter to bids (keep the best N, which are now at the end)
+        if let Some(max) = max_level
+            && bids.len() > max
+        {
+            bids = bids[bids.len().saturating_sub(max)..].to_vec();
+        }
+
+        // Filter and sort asks: ascending (best to worst), so best_ask is first
+        let mut asks: Vec<LobLevel> = self
+            .asks
+            .iter()
+            .filter_map(|(k, v)| {
+                let price = k.0;
+                let amount = *v;
+                if amount == 0.0 {
+                    return None;
+                }
+                // Apply max_level_pct filter
+                if max_level_pct > 0.0
+                    && let Some(best) = ask_best
+                    && price > best * (1.0 + max_level_pct / 100.0)
+                {
+                    return None;
+                }
+                Some(LobLevel {
+                    price,
+                    size: amount,
+                })
+            })
+            .collect();
+
+        // Sort asks ascending (best to worst) so best_ask is first
+        asks.sort_by(|a, b| {
+            a.price
+                .partial_cmp(&b.price)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // Apply max_level filter to asks (keep the best N, which are at the beginning)
+        if let Some(max) = max_level
+            && asks.len() > max
+        {
+            asks.truncate(max);
+        }
+
+        // Check again after filtering
+        if bids.is_empty() || asks.is_empty() {
+            return None;
+        }
+
+        Some(LobItem {
+            ts,
+            exchange: exchange.to_string(),
+            bids,
+            asks,
+        })
     }
 }
 
@@ -441,104 +433,58 @@ mod tests {
         }"#;
         let msg = KrakenWsMessage::from_json(json).unwrap();
         let mut book = OrderBook::new();
-        book.process_msg(&msg, None);
+        book.process_msg(&msg);
         assert_eq!(book.num_bids(), 2);
         assert_eq!(book.num_asks(), 1);
     }
 
     #[test]
-    fn test_filter_levels_batch_respects_max_level() {
-        // Test that filter_levels correctly limits the number of new levels
-        // added in a single batch, even when the book is empty.
-        let filter = LobFilter::MaxLevel(3);
+    fn test_to_lob_item_returns_none_when_empty() {
         let book = OrderBook::new();
-
-        // Simulate an update with 5 bid levels (book is empty)
-        let updates = vec![
-            (50000.0, 1.0),
-            (49900.0, 2.0),
-            (49800.0, 3.0),
-            (49700.0, 4.0),
-            (49600.0, 5.0),
-        ];
-
-        let filtered = book.filter_levels(&updates, Side::Bid, &filter);
-        // Should only include first 3 levels (max_level=3)
-        assert_eq!(filtered.len(), 3, "batch filter should respect max_level");
-        // Verify it's the best 3 prices (highest for bids)
-        assert!((filtered[0].0 - 50000.0).abs() < f64::EPSILON);
-        assert!((filtered[1].0 - 49900.0).abs() < f64::EPSILON);
-        assert!((filtered[2].0 - 49800.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_filter_levels_batch_respects_max_level_asks() {
-        let filter = LobFilter::MaxLevel(2);
-        let book = OrderBook::new();
-
-        let updates = vec![
-            (50100.0, 1.0),
-            (50200.0, 2.0),
-            (50300.0, 3.0),
-            (50400.0, 4.0),
-        ];
-
-        let filtered = book.filter_levels(&updates, Side::Ask, &filter);
-        // Should only include first 2 levels (max_level=2)
-        assert_eq!(filtered.len(), 2, "batch filter should respect max_level for asks");
-        // Verify it's the best 2 prices (lowest for asks)
-        assert!((filtered[0].0 - 50100.0).abs() < f64::EPSILON);
-        assert!((filtered[1].0 - 50200.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_filter_levels_existing_price_always_included() {
-        // Existing price levels should always be included regardless of max_level
-        let filter = LobFilter::MaxLevel(1);
-        let mut book = OrderBook::new();
-        book.apply_snapshot(&[(50000.0, 1.0)], Side::Bid);
-        assert_eq!(book.num_bids(), 1);
-
-        let updates = vec![(50000.0, 5.0), (49900.0, 2.0)];
-
-        let filtered = book.filter_levels(&updates, Side::Bid, &filter);
-        assert_eq!(filtered.len(), 1);
-        assert!((filtered[0].0 - 50000.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_filter_levels_with_existing_levels_respects_max_level() {
-        let filter = LobFilter::MaxLevel(2);
-        let mut book = OrderBook::new();
-        book.apply_snapshot(&[(50000.0, 1.0)], Side::Bid);
-        assert_eq!(book.num_bids(), 1);
-
-        let updates = vec![(49900.0, 2.0), (49800.0, 3.0), (49700.0, 4.0)];
-
-        let filtered = book.filter_levels(&updates, Side::Bid, &filter);
-        assert_eq!(
-            filtered.len(),
-            1,
-            "only 1 new level fits within max_level=2 (1 existing + 1 new)"
+        let result = book.to_lob_item(0, "test", None, 0.0);
+        assert!(
+            result.is_none(),
+            "Should return None when bids or asks are empty"
         );
-        assert!((filtered[0].0 - 49900.0).abs() < f64::EPSILON);
     }
 
     #[test]
-    fn test_filter_levels_existing_price_in_updates_included_always() {
-        let filter = LobFilter::MaxLevel(1);
+    fn test_to_lob_item_filters_by_max_level() {
+        let mut book = OrderBook::new();
+        book.apply_snapshot(&[(50000.0, 1.0), (49900.0, 2.0), (49800.0, 3.0)], Side::Bid);
+        book.apply_snapshot(&[(50100.0, 1.0), (50200.0, 2.0), (50300.0, 3.0)], Side::Ask);
+        let lob = book.to_lob_item(0, "test", Some(2), 0.0).unwrap();
+        assert_eq!(lob.bids.len(), 2);
+        assert_eq!(lob.asks.len(), 2);
+    }
+
+    #[test]
+    fn test_to_lob_item_sorts_bids_with_best_bid_last() {
         let mut book = OrderBook::new();
         book.apply_snapshot(&[(50000.0, 1.0)], Side::Bid);
-        assert_eq!(book.num_bids(), 1);
-
-        let updates = vec![(50000.0, 5.0), (49900.0, 2.0)];
-
-        let filtered = book.filter_levels(&updates, Side::Bid, &filter);
-        assert_eq!(
-            filtered.len(),
-            1,
-            "existing price should always be included in updates"
+        book.apply_snapshot(&[(50100.0, 1.0)], Side::Ask);
+        book.apply_update(&[(49900.0, 2.0)], Side::Bid);
+        book.apply_update(&[(49800.0, 3.0)], Side::Bid);
+        let lob = book.to_lob_item(0, "test", Some(10), 0.0).unwrap();
+        assert_eq!(lob.bids.len(), 3);
+        assert!(
+            (lob.bids[2].price - 50000.0).abs() < f64::EPSILON,
+            "Best bid (50000.0) should be last element"
         );
-        assert!((filtered[0].0 - 50000.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_to_lob_item_sorts_asks_with_best_ask_first() {
+        let mut book = OrderBook::new();
+        book.apply_snapshot(&[(50100.0, 1.0)], Side::Ask);
+        book.apply_snapshot(&[(50000.0, 1.0)], Side::Bid);
+        book.apply_update(&[(50200.0, 2.0)], Side::Ask);
+        book.apply_update(&[(50300.0, 3.0)], Side::Ask);
+        let lob = book.to_lob_item(0, "test", Some(10), 0.0).unwrap();
+        assert_eq!(lob.asks.len(), 3);
+        assert!(
+            (lob.asks[0].price - 50100.0).abs() < f64::EPSILON,
+            "Best ask (50100.0) should be first element"
+        );
     }
 }

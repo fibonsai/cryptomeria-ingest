@@ -1,8 +1,7 @@
-use crate::items::{LobItem, LobLevel, MarketDataItem, TradeItem};
+use crate::items::{LobItem, MarketDataItem, TradeItem};
 use crate::kraken::lob::OrderBook;
 use crate::kraken::types::{KrakenWsMessage, MessageType, TradeData};
 use crate::logger::logger as log;
-use crate::traits::LobFilter;
 use crate::wsloop::ExchangeAdapter;
 use rasant::Level;
 
@@ -31,8 +30,8 @@ pub struct KrakenAdapter {
     pub max_level_pct: f64,
     pub max_level: Option<usize>,
     pub snapshot_depth: usize,
-    lob_filter: Option<LobFilter>,
     book: OrderBook,
+    prev_lob: Option<LobItem>, // Track previous LOB for duplicate detection
 }
 
 impl KrakenAdapter {
@@ -43,13 +42,6 @@ impl KrakenAdapter {
         max_level: Option<usize>,
         snapshot_depth: usize,
     ) -> Self {
-        let lob_filter = if let Some(max) = max_level {
-            Some(LobFilter::MaxLevel(max))
-        } else if max_level_pct > 0.0 {
-            Some(LobFilter::MaxLevelPct(max_level_pct))
-        } else {
-            None
-        };
         Self {
             instrument,
             region,
@@ -57,34 +49,28 @@ impl KrakenAdapter {
             max_level_pct,
             max_level,
             snapshot_depth,
-            lob_filter,
             book: OrderBook::new(),
+            prev_lob: None,
         }
     }
 
-    fn normalize_lob(&self, book: &OrderBook, ts: u64) -> MarketDataItem {
-        let bids: Vec<LobLevel> = book
-            .bids
-            .iter()
-            .map(|(k, v)| LobLevel {
-                price: k.0.0,
-                size: *v,
-            })
-            .collect();
-        let asks: Vec<LobLevel> = book
-            .asks
-            .iter()
-            .map(|(k, v)| LobLevel {
-                price: k.0,
-                size: *v,
-            })
-            .collect();
-        MarketDataItem::Lob(LobItem {
-            ts,
-            exchange: self.exchange.to_string(),
-            bids,
-            asks,
-        })
+    fn emit_lob(&mut self, ts: u64) -> Option<MarketDataItem> {
+        let lob = self
+            .book
+            .to_lob_item(ts, self.exchange, self.max_level, self.max_level_pct)?;
+
+        // Check for duplicate (same bids and asks as previous)
+        if let Some(prev) = &self.prev_lob
+            && prev.bids == lob.bids
+            && prev.asks == lob.asks
+        {
+            return None; // Duplicate, don't emit
+        }
+
+        // Store current as previous for next comparison
+        self.prev_lob = Some(lob.clone());
+
+        Some(MarketDataItem::Lob(lob))
     }
 }
 
@@ -117,8 +103,8 @@ impl ExchangeAdapter for KrakenAdapter {
                         .as_millis() as u64
                 });
 
-                self.book.process_msg(msg, self.lob_filter.as_ref());
-                Some(self.normalize_lob(&self.book, ts))
+                self.book.process_msg(msg);
+                self.emit_lob(ts)
             }
             MessageType::Trade => {
                 if let Some(trade_raw) = msg
