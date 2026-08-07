@@ -107,6 +107,7 @@ impl ExchangeAdapter for KrakenAdapter {
     }
 
     fn handle_message(&mut self, msg: &Self::Message) -> Option<MarketDataItem> {
+        let mut logger = log().lock().unwrap();
         match msg.message_type() {
             MessageType::L2Snapshot | MessageType::L2Update | MessageType::L2 => {
                 let ts = msg.timestamp_ms().unwrap_or_else(|| {
@@ -141,23 +142,17 @@ impl ExchangeAdapter for KrakenAdapter {
                         seq_id: None,
                     }))
                 } else {
-                    log()
-                        .lock()
-                        .unwrap()
-                        .log(Level::Warning, "[kraken] failed to parse trade data");
+                    logger.log(Level::Warning, "[kraken] failed to parse trade data");
                     None
                 }
             }
             MessageType::Heartbeat | MessageType::Status => None,
             MessageType::Event => {
-                log()
-                    .lock()
-                    .unwrap()
-                    .log(Level::Info, &format!("[kraken] event: {}", msg.summary()));
+                logger.log(Level::Info, &format!("[kraken] event: {}", msg.summary()));
                 None
             }
             MessageType::Unknown => {
-                log().lock().unwrap().log(
+                logger.log(
                     Level::Warning,
                     &format!("[kraken] unknown message: {}", msg.summary()),
                 );
