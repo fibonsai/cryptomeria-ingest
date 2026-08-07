@@ -12,12 +12,12 @@ static EXCHANGE_URL: LazyLock<RegionDict> = LazyLock::new(|| {
 
     let mut okx_global = HashMap::new();
     okx_global.insert("websocket", "wss://ws.okx.com:8443/ws/v5/public");
-    okx_global.insert("rest", "");
+    okx_global.insert("rest", "https://www.okx.com");
     global.insert("okx", okx_global);
 
     let mut kraken_global = HashMap::new();
     kraken_global.insert("websocket", "wss://ws.kraken.com/v2");
-    kraken_global.insert("rest", "");
+    kraken_global.insert("rest", "https://api.kraken.com");
     global.insert("kraken", kraken_global);
 
     let mut bitstamp_global = HashMap::new();
@@ -31,12 +31,12 @@ static EXCHANGE_URL: LazyLock<RegionDict> = LazyLock::new(|| {
 
     let mut okx_europe = HashMap::new();
     okx_europe.insert("websocket", "wss://wseea.okx.com:8443/ws/v5/public");
-    okx_europe.insert("rest", "");
+    okx_europe.insert("rest", "https://www.okx.com");
     europe.insert("okx", okx_europe);
 
     let mut kraken_europe = HashMap::new();
     kraken_europe.insert("websocket", "wss://ws.kraken.com/v2");
-    kraken_europe.insert("rest", "");
+    kraken_europe.insert("rest", "https://api.kraken.com");
     europe.insert("kraken", kraken_europe);
 
     let mut bitstamp_europe = HashMap::new();
