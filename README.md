@@ -128,6 +128,7 @@ Limit Order Book snapshot or incremental update.
 | Field | Type | Description |
 |-------|------|-------------|
 | `ts` | `u64` | Exchange timestamp in milliseconds since epoch |
+| `exchange` | `String` | Source exchange name: `"okx"`, `"kraken"`, `"bitstamp"` |
 | `bids` | `Vec<LobLevel>` | Bid levels, sorted descending (best bid first) |
 | `asks` | `Vec<LobLevel>` | Ask levels, sorted ascending (best ask first) |
 
@@ -137,8 +138,8 @@ Single price level.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `price` | `f64` | Price |
-| `size` | `f64` | Size (quantity) |
+| `price` | `f64` | Price (JSON key `p`) |
+| `size` | `f64` | Size, quantity (JSON key `s`) |
 
 #### `TradeItem`
 
@@ -147,6 +148,7 @@ Trade execution.
 | Field | Type | Description |
 |-------|------|-------------|
 | `ts` | `u64` | Exchange timestamp in milliseconds since epoch |
+| `exchange` | `String` | Source exchange name (e.g. `"okx"`) |
 | `price` | `f64` | Trade price |
 | `size` | `f64` | Trade size (quantity) |
 | `side` | `String` | `"buy"` or `"sell"` |
@@ -161,6 +163,15 @@ The main entry point. Returns a stream of market data results.
 - **Subsequent `LobItem`**: Incremental updates (post-filtered by `max_level`/`max_level_pct`)
 - **Stream ends**: On fatal error (max reconnect attempts exceeded) or when the stream is dropped
 - **Errors**: Wrapped in `IngestError` (config, connection, parse, etc.)
+
+### JSON output schema
+
+Items serialize with lowercase variant keys and an `exchange` field; LOB levels use compact `p`/`s` keys.
+
+```json
+{"lob":{"ts":1700000000000,"exchange":"okx","bids":[{"p":100.5,"s":2.0}],"asks":[{"p":101.0,"s":1.5}]}}
+{"trade":{"ts":1700000000000,"exchange":"okx","price":100.5,"size":2.0,"side":"buy","trade_id":"t1","seq_id":null}}
+```
 
 ## Usage Examples
 
