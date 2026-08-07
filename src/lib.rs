@@ -46,7 +46,9 @@ pub mod bitstamp;
 pub mod kraken;
 pub mod okx;
 
-pub use config::{DataKind, DataSourceConfig, ResilienceConfig};
+pub use config::{
+    CaseFallback, DataKind, DataSourceConfig, ExchangeFallbackMapping, ResilienceConfig,
+};
 pub use items::{IngestError, LobItem, MarketDataItem, TradeItem};
 pub use stream::stream;
 pub use traits::{LevelVec, LevelsWithinPct, LobFilter, OrderBook};
