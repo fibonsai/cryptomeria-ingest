@@ -1,9 +1,10 @@
 use crate::items::{LobItem, LobLevel, MarketDataItem, TradeItem};
 use crate::kraken::lob::OrderBook;
 use crate::kraken::types::{KrakenWsMessage, MessageType, TradeData};
-use crate::logging;
+use crate::logger::logger as log;
 use crate::traits::LobFilter;
 use crate::wsloop::ExchangeAdapter;
+use rasant::Level;
 
 /// Subscribe message builder for Kraken.
 pub fn build_subscribe_msg(channel: &str, instrument: &str) -> String {
@@ -140,17 +141,26 @@ impl ExchangeAdapter for KrakenAdapter {
                         seq_id: None,
                     }))
                 } else {
-                    logging::warn("kraken", "failed to parse trade data");
+                    log()
+                        .lock()
+                        .unwrap()
+                        .log(Level::Warning, "[kraken] failed to parse trade data");
                     None
                 }
             }
             MessageType::Heartbeat | MessageType::Status => None,
             MessageType::Event => {
-                logging::info("kraken", &format!("event: {}", msg.summary()));
+                log()
+                    .lock()
+                    .unwrap()
+                    .log(Level::Info, &format!("[kraken] event: {}", msg.summary()));
                 None
             }
             MessageType::Unknown => {
-                logging::warn("kraken", &format!("unknown message: {}", msg.summary()));
+                log().lock().unwrap().log(
+                    Level::Warning,
+                    &format!("[kraken] unknown message: {}", msg.summary()),
+                );
                 None
             }
         }

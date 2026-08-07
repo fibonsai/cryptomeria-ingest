@@ -1,9 +1,10 @@
 use crate::items::{LobItem, LobLevel, MarketDataItem, TradeItem};
-use crate::logging;
+use crate::logger::logger as log;
 use crate::okx::lob::OrderBook;
 use crate::okx::types::{MessageType, OkxWsMessage, TradeData};
 use crate::traits::LobFilter;
 use crate::wsloop::ExchangeAdapter;
+use rasant::Level;
 
 /// Subscribe message builder — pure function, testable without I/O.
 pub fn build_subscribe_msg(channel: &str, instrument: &str) -> String {
@@ -141,16 +142,25 @@ impl ExchangeAdapter for OkxAdapter {
                         seq_id: None,
                     }))
                 } else {
-                    logging::warn("okx", "failed to parse trade data");
+                    log()
+                        .lock()
+                        .unwrap()
+                        .log(Level::Warning, "[okx] failed to parse trade data");
                     None
                 }
             }
             MessageType::Event => {
-                logging::info("okx", &format!("event: {}", msg.summary()));
+                log()
+                    .lock()
+                    .unwrap()
+                    .log(Level::Info, &format!("[okx] event: {}", msg.summary()));
                 None
             }
             MessageType::Unknown => {
-                logging::warn("okx", &format!("unknown message: {}", msg.summary()));
+                log().lock().unwrap().log(
+                    Level::Warning,
+                    &format!("[okx] unknown message: {}", msg.summary()),
+                );
                 None
             }
             MessageType::L2 => {

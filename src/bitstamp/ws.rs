@@ -1,10 +1,11 @@
 use crate::bitstamp::lob::OrderBook;
 use crate::bitstamp::types::{BitstampWsMessage, MessageType, OrderBookData, TradeData};
 use crate::items::{LobItem, LobLevel, MarketDataItem, TradeItem};
-use crate::logging;
+use crate::logger::logger as log;
 use crate::traits::LobFilter;
 use crate::urls::rest_url;
 use crate::wsloop::ExchangeAdapter;
+use rasant::Level;
 
 /// Subscribe message builder for Bitstamp.
 pub fn build_subscribe_msg(channel: &str) -> String {
@@ -188,16 +189,25 @@ impl ExchangeAdapter for BitstampAdapter {
                         seq_id: None,
                     }))
                 } else {
-                    logging::warn("bitstamp", "failed to parse trade data");
+                    log()
+                        .lock()
+                        .unwrap()
+                        .log(Level::Warning, "[bitstamp] failed to parse trade data");
                     None
                 }
             }
             MessageType::Event => {
-                logging::info("bitstamp", &format!("event: {}", msg.summary()));
+                log()
+                    .lock()
+                    .unwrap()
+                    .log(Level::Info, &format!("[bitstamp] event: {}", msg.summary()));
                 None
             }
             MessageType::Unknown => {
-                logging::warn("bitstamp", &format!("unknown message: {}", msg.summary()));
+                log().lock().unwrap().log(
+                    Level::Warning,
+                    &format!("[bitstamp] unknown message: {}", msg.summary()),
+                );
                 None
             }
         }

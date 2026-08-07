@@ -36,7 +36,7 @@
 
 pub mod config;
 pub mod items;
-pub mod logging;
+pub mod logger;
 pub mod stream;
 pub mod traits;
 pub mod urls;
@@ -48,7 +48,6 @@ pub mod okx;
 
 pub use config::{DataKind, DataSourceConfig, ResilienceConfig};
 pub use items::{IngestError, LobItem, MarketDataItem, TradeItem};
-pub use logging::{debug, error, info, init, warn};
 pub use stream::stream;
 pub use traits::{LevelVec, LevelsWithinPct, LobFilter, OrderBook};
 pub use urls::{rest_url, websocket_url};
