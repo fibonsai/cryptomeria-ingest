@@ -35,6 +35,7 @@
 //! ```
 
 pub mod config;
+pub mod instrument;
 pub mod items;
 pub mod logger;
 pub mod stream;
@@ -49,6 +50,7 @@ pub mod okx;
 pub use config::{
     CaseFallback, DataKind, DataSourceConfig, ExchangeFallbackMapping, ResilienceConfig,
 };
+pub use instrument::{generate_fallback_variants, validate_with_fallback};
 pub use items::{IngestError, LobItem, MarketDataItem, TradeItem};
 pub use stream::stream;
 pub use traits::{LevelVec, LevelsWithinPct, LobFilter, OrderBook};
