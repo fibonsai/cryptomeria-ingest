@@ -410,7 +410,7 @@ mod tests {
 
     #[test]
     fn test_new_book_empty() {
-        let mut book = OrderBook::new();
+        let book = OrderBook::new();
         assert_eq!(book.num_bids(), 0);
         assert_eq!(book.num_asks(), 0);
         assert_eq!(book.best_bid(), None);
@@ -500,7 +500,7 @@ mod tests {
 
     #[test]
     fn test_spread_empty() {
-        let mut book = OrderBook::new();
+        let book = OrderBook::new();
         assert_eq!(book.spread(), None);
     }
 
@@ -521,7 +521,7 @@ mod tests {
 
     #[test]
     fn test_display_empty_book() {
-        let mut book = OrderBook::new();
+        let book = OrderBook::new();
         let out = book.display("BTC-USDT", 0.1);
         assert!(out.contains("bids=0"));
         assert!(out.contains("asks=0"));
@@ -648,7 +648,7 @@ mod tests {
 
     #[test]
     fn test_levels_within_pct_empty_handling() {
-        let mut book = OrderBook::new();
+        let book = OrderBook::new();
         let (bids, asks) = book.levels_within_pct(0.1);
         assert!(bids.is_empty());
         assert!(asks.is_empty());
@@ -781,7 +781,11 @@ mod tests {
 
         let filtered = book.filter_levels(&updates, Side::Ask, &filter);
         // Should only include first 2 levels (max_level=2)
-        assert_eq!(filtered.len(), 2, "batch filter should respect max_level for asks");
+        assert_eq!(
+            filtered.len(),
+            2,
+            "batch filter should respect max_level for asks"
+        );
         // Verify it's the best 2 prices (lowest for asks)
         assert!((filtered[0][0].parse::<f64>().unwrap() - 101.0).abs() < f64::EPSILON);
         assert!((filtered[1][0].parse::<f64>().unwrap() - 102.0).abs() < f64::EPSILON);
