@@ -1,6 +1,8 @@
 use clap::Parser;
 use cryptomeria_ingest::{DataKind, DataSourceConfig, ResilienceConfig, stream};
 use futures_util::StreamExt;
+use std::collections::HashMap;
+use std::fs;
 
 /// Clap CLI definition
 #[derive(Parser)]
@@ -11,19 +13,21 @@ use futures_util::StreamExt;
 )]
 struct Cli {
     #[clap(long)]
-    exchange: String,
+    config: Option<String>,
     #[clap(long)]
-    region: String,
+    exchange: Option<String>,
     #[clap(long)]
-    instrument: String,
+    region: Option<String>,
     #[clap(long)]
-    data_kind: String,
+    instrument: Option<String>,
+    #[clap(long)]
+    data_kind: Option<String>,
     #[clap(long)]
     max_level: Option<usize>,
     #[clap(long)]
-    max_level_pct: f64,
+    max_level_pct: Option<f64>,
     #[clap(long)]
-    snapshot_depth: usize,
+    snapshot_depth: Option<usize>,
     #[clap(flatten)]
     resilience: ResilienceCli,
 }
@@ -59,31 +63,53 @@ fn parse_data_kind(s: &str) -> DataKind {
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
-    let data_kind = parse_data_kind(&cli.data_kind);
+
+    // Load config from file if provided, otherwise use CLI flags
+    let config = if let Some(config_path) = &cli.config {
+        let content = fs::read_to_string(config_path).unwrap_or_else(|e| {
+            eprintln!("Failed to read config file: {e}");
+            std::process::exit(1);
+        });
+        toml::from_str::<DataSourceConfig>(&content).unwrap_or_else(|e| {
+            eprintln!("Failed to parse config file: {e}");
+            std::process::exit(1);
+        })
+    } else {
+        let data_kind = parse_data_kind(
+            cli.data_kind
+                .as_deref()
+                .expect("data-kind is required when not using --config"),
+        );
+        DataSourceConfig {
+            exchange: cli
+                .exchange
+                .expect("exchange is required when not using --config"),
+            region: cli
+                .region
+                .expect("region is required when not using --config"),
+            instrument: cli
+                .instrument
+                .expect("instrument is required when not using --config"),
+            data_kind,
+            max_level: cli.max_level,
+            max_level_pct: cli.max_level_pct.unwrap_or(0.0),
+            snapshot_depth: cli.snapshot_depth.unwrap_or(400),
+            resilience: ResilienceConfig {
+                initial_backoff_ms: cli.resilience.initial_backoff_ms,
+                max_backoff_ms: cli.resilience.max_backoff_ms,
+                backoff_multiplier: cli.resilience.backoff_multiplier,
+                jitter_ms: cli.resilience.jitter_ms,
+                heartbeat_interval_secs: cli.resilience.heartbeat_interval_secs,
+                max_attempts: cli.resilience.max_attempts,
+            },
+            fallback: HashMap::new(),
+        }
+    };
 
     println!(
         "Subscribing to {} {} ({})...",
-        cli.exchange, cli.instrument, data_kind
+        config.exchange, config.instrument, config.data_kind
     );
-
-    // Build Config from CLI options
-    let config = DataSourceConfig {
-        exchange: cli.exchange,
-        region: cli.region,
-        instrument: cli.instrument,
-        data_kind,
-        max_level: cli.max_level,
-        max_level_pct: cli.max_level_pct,
-        snapshot_depth: cli.snapshot_depth,
-        resilience: ResilienceConfig {
-            initial_backoff_ms: cli.resilience.initial_backoff_ms,
-            max_backoff_ms: cli.resilience.max_backoff_ms,
-            backoff_multiplier: cli.resilience.backoff_multiplier,
-            jitter_ms: cli.resilience.jitter_ms,
-            heartbeat_interval_secs: cli.resilience.heartbeat_interval_secs,
-            max_attempts: cli.resilience.max_attempts,
-        },
-    };
 
     if let Err(e) = config.validate() {
         eprintln!("Invalid configuration: {e}");

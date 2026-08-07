@@ -1,9 +1,10 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error};
+use std::collections::HashMap;
 use std::fmt;
 
 /// Data kind flags — modeled as a bitflags-style struct so one `stream()` call
 /// subscribes to both LOB and trades on a single connection (matching monolith behavior).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct DataKind(u8);
 
 impl DataKind {
@@ -45,6 +46,30 @@ impl fmt::Display for DataKind {
             parts.push("Trade");
         }
         write!(f, "{}", parts.join("|"))
+    }
+}
+
+impl<'de> Deserialize<'de> for DataKind {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        let mut kind = DataKind::empty();
+        for part in s.split('|') {
+            match part.trim() {
+                "Lob" => kind.insert(DataKind::LOB),
+                "Trade" => kind.insert(DataKind::TRADE),
+                "" => {}
+                _ => return Err(D::Error::custom(format!("invalid data_kind: {}", part))),
+            }
+        }
+        if kind.is_empty() {
+            return Err(D::Error::custom(
+                "data_kind must include at least Lob or Trade",
+            ));
+        }
+        Ok(kind)
     }
 }
 
@@ -91,6 +116,48 @@ impl Default for ResilienceConfig {
     }
 }
 
+/// Case fallback mode for instrument components.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum CaseFallback {
+    /// No case conversion.
+    #[default]
+    None,
+    /// Convert to lowercase (e.g., "BTC-USDT" -> "btc-usdt").
+    Lower,
+    /// Convert to uppercase (e.g., "btc-usdt" -> "BTC-USDT").
+    Upper,
+}
+
+/// Fallback mapping for a single exchange.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExchangeFallbackMapping {
+    /// Base currency mappings in priority order (e.g., ["XBT", "BTC"]).
+    #[serde(default)]
+    pub base_mappings: Vec<String>,
+    /// Quote currency mappings in priority order (e.g., ["USDT", "USDC", "USD"]).
+    #[serde(default)]
+    pub quote_mappings: Vec<String>,
+    /// Separator mappings in priority order (e.g., ["/", "-", ""]).
+    #[serde(default)]
+    pub separator_mappings: Vec<String>,
+    /// Case conversion fallback: "lower", "upper", or "none" (default "none").
+    /// Applies to base, quote, and separator components after other mappings.
+    #[serde(default)]
+    pub case_fallback: CaseFallback,
+}
+
+impl Default for ExchangeFallbackMapping {
+    fn default() -> Self {
+        Self {
+            base_mappings: Vec::new(),
+            quote_mappings: Vec::new(),
+            separator_mappings: Vec::new(),
+            case_fallback: CaseFallback::None,
+        }
+    }
+}
+
 /// Complete configuration for a single `stream()` call.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DataSourceConfig {
@@ -105,11 +172,22 @@ pub struct DataSourceConfig {
     /// Maximum number of price levels per side (None = no limit).
     pub max_level: Option<usize>,
     /// Maximum percentage from best price (0.0 = no limit).
+    #[serde(default)]
     pub max_level_pct: f64,
     /// Snapshot depth for Bitstamp REST fetch (default 400).
+    #[serde(default = "default_snapshot_depth")]
     pub snapshot_depth: usize,
     /// Reconnection/backoff settings.
+    #[serde(default)]
     pub resilience: ResilienceConfig,
+    /// Per-exchange fallback mappings (only used by demo app config file).
+    /// Key is exchange name ("okx", "kraken", "bitstamp").
+    #[serde(default)]
+    pub fallback: HashMap<String, ExchangeFallbackMapping>,
+}
+
+fn default_snapshot_depth() -> usize {
+    400
 }
 
 impl DataSourceConfig {
@@ -192,6 +270,7 @@ impl Default for DataSourceConfig {
             max_level_pct: 0.0,
             snapshot_depth: 400,
             resilience: ResilienceConfig::default(),
+            fallback: HashMap::new(),
         }
     }
 }
