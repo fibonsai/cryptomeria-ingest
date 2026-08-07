@@ -37,7 +37,7 @@ pub struct LobItem {
 }
 
 /// Single price level in the LOB.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LobLevel {
     #[serde(rename = "p")]
     pub price: f64,

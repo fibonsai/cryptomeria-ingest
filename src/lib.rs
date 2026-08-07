@@ -53,5 +53,5 @@ pub use config::{
 pub use instrument::{generate_fallback_variants, select_fallback_mapping, validate_with_fallback};
 pub use items::{IngestError, LobItem, MarketDataItem, TradeItem};
 pub use stream::stream;
-pub use traits::{LevelVec, LevelsWithinPct, LobFilter, OrderBook};
+pub use traits::{LevelVec, LevelsWithinPct, OrderBook};
 pub use urls::{rest_url, websocket_url};

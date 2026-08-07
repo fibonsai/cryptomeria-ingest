@@ -1,7 +1,8 @@
 use crate::bitstamp::types::{
     BitstampWsMessage, MessageType, OrderBookData, OrderEntry, TradeData,
 };
-use crate::traits::{LevelsWithinPct, LobFilter, OrderBook as OrderBookTrait};
+use crate::items::{LobItem, LobLevel};
+use crate::traits::{LevelsWithinPct, OrderBook as OrderBookTrait};
 use ordered_float::OrderedFloat;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap};
@@ -154,7 +155,7 @@ impl OrderBook {
         }
     }
 
-    pub fn process_msg(&mut self, msg: &BitstampWsMessage, filter: Option<&LobFilter>) {
+    pub fn process_msg(&mut self, msg: &BitstampWsMessage) {
         let data = match msg.data.as_ref() {
             Some(d) => d,
             None => return,
@@ -164,11 +165,6 @@ impl OrderBook {
             MessageType::L2Snapshot | MessageType::L2Update => {
                 // order_book / diff_order_book style
                 if let Ok(ob) = serde_json::from_value::<OrderBookData>(data.clone()) {
-                    let ob = if let Some(f) = filter {
-                        self.filter_orderbook(ob, f)
-                    } else {
-                        ob
-                    };
                     self.apply_orderbook(&ob);
                 }
             }
@@ -226,75 +222,6 @@ impl OrderBook {
         }
     }
 
-    fn filter_orderbook(&self, mut ob: OrderBookData, filter: &LobFilter) -> OrderBookData {
-        let bid_best = self.best_bid();
-        let ask_best = self.best_ask();
-
-        // Filter bids - track included levels within batch
-        let mut bids_included = 0usize;
-        let initial_bids = self.num_bids();
-        ob.bids.retain(|level| {
-            if level.len() >= 2 {
-                if let (Ok(price), Ok(amount)) = (level[0].parse::<f64>(), level[1].parse::<f64>())
-                {
-                    let side_is_bid = true;
-                    let price_exists = self.bids.contains_key(&Reverse(OrderedFloat(price)));
-                    let current_levels = initial_bids + bids_included;
-                    let include = filter.should_include(
-                        bid_best,
-                        ask_best,
-                        price,
-                        amount,
-                        side_is_bid,
-                        current_levels,
-                        price_exists,
-                    );
-                    if include {
-                        bids_included += 1;
-                    }
-                    include
-                } else {
-                    true
-                }
-            } else {
-                true
-            }
-        });
-
-        // Filter asks - track included levels within batch
-        let mut asks_included = 0usize;
-        let initial_asks = self.num_asks();
-        ob.asks.retain(|level| {
-            if level.len() >= 2 {
-                if let (Ok(price), Ok(amount)) = (level[0].parse::<f64>(), level[1].parse::<f64>())
-                {
-                    let side_is_bid = false;
-                    let price_exists = self.asks.contains_key(&OrderedFloat(price));
-                    let current_levels = initial_asks + asks_included;
-                    let include = filter.should_include(
-                        bid_best,
-                        ask_best,
-                        price,
-                        amount,
-                        side_is_bid,
-                        current_levels,
-                        price_exists,
-                    );
-                    if include {
-                        asks_included += 1;
-                    }
-                    include
-                } else {
-                    true
-                }
-            } else {
-                true
-            }
-        });
-
-        ob
-    }
-
     pub fn total_bid_size(&self) -> f64 {
         self.bids.values().sum()
     }
@@ -326,6 +253,113 @@ impl OrderBook {
             .collect();
 
         formatted.join(", ")
+    }
+
+    /// Create a LobItem with post-filtering applied.
+    ///
+    /// Applies max_level and max_level_pct filters, sorts bids ascending (worst to best,
+    /// so best_bid is last element) and asks ascending (best to worst, so best_ask is first element).
+    pub fn to_lob_item(
+        &self,
+        ts: u64,
+        exchange: &str,
+        max_level: Option<usize>,
+        max_level_pct: f64,
+    ) -> Option<LobItem> {
+        if self.bids.is_empty() || self.asks.is_empty() {
+            return None;
+        }
+
+        let bid_best = self.best_bid();
+        let ask_best = self.best_ask();
+
+        // Filter and sort bids: ascending (worst to best), so best_bid is last
+        let mut bids: Vec<LobLevel> = self
+            .bids
+            .iter()
+            .filter_map(|(k, v)| {
+                let price = k.0.0;
+                let amount = *v;
+                if amount == 0.0 {
+                    return None;
+                }
+                // Apply max_level_pct filter
+                if max_level_pct > 0.0
+                    && let Some(best) = bid_best
+                    && price < best * (1.0 - max_level_pct / 100.0)
+                {
+                    return None;
+                }
+                Some(LobLevel {
+                    price,
+                    size: amount,
+                })
+            })
+            .collect();
+
+        // Sort bids ascending (worst to best) so best_bid is last
+        bids.sort_by(|a, b| {
+            a.price
+                .partial_cmp(&b.price)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // Apply max_level filter to bids (keep the best N, which are now at the end)
+        if let Some(max) = max_level
+            && bids.len() > max
+        {
+            bids = bids[bids.len().saturating_sub(max)..].to_vec();
+        }
+
+        // Filter and sort asks: ascending (best to worst), so best_ask is first
+        let mut asks: Vec<LobLevel> = self
+            .asks
+            .iter()
+            .filter_map(|(k, v)| {
+                let price = k.0;
+                let amount = *v;
+                if amount == 0.0 {
+                    return None;
+                }
+                // Apply max_level_pct filter
+                if max_level_pct > 0.0
+                    && let Some(best) = ask_best
+                    && price > best * (1.0 + max_level_pct / 100.0)
+                {
+                    return None;
+                }
+                Some(LobLevel {
+                    price,
+                    size: amount,
+                })
+            })
+            .collect();
+
+        // Sort asks ascending (best to worst) so best_ask is first
+        asks.sort_by(|a, b| {
+            a.price
+                .partial_cmp(&b.price)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // Apply max_level filter to asks (keep the best N, which are at the beginning)
+        if let Some(max) = max_level
+            && asks.len() > max
+        {
+            asks.truncate(max);
+        }
+
+        // Check again after filtering
+        if bids.is_empty() || asks.is_empty() {
+            return None;
+        }
+
+        Some(LobItem {
+            ts,
+            exchange: exchange.to_string(),
+            bids,
+            asks,
+        })
     }
 }
 
@@ -377,7 +411,7 @@ mod tests {
 
     #[test]
     fn test_new_book_empty() {
-        let book = OrderBook::new();
+        let mut book = OrderBook::new();
         assert_eq!(book.num_bids(), 0);
         assert_eq!(book.num_asks(), 0);
     }
@@ -541,162 +575,181 @@ mod tests {
     }
 
     #[test]
-    fn test_filter_orderbook_batch_respects_max_level() {
-        // Test that filter_orderbook correctly limits the number of new levels
-        // added in a single batch, even when the book is empty.
-        let filter = LobFilter::MaxLevel(3);
-        let book = OrderBook::new();
+    fn test_to_lob_item_returns_none_when_bids_empty() {
+        let mut book = OrderBook::new();
+        book.apply_orderbook(&OrderBookData {
+            bids: vec![],
+            asks: vec![["101.0".into(), "1.0".into()]],
+            timestamp: "0".to_string(),
+            microtimestamp: "0".to_string(),
+        });
+        let result = book.to_lob_item(0, "test", None, 0.0);
+        assert!(result.is_none(), "Should return None when bids are empty");
+    }
 
-        // Simulate a snapshot with 5 bid levels (book is empty)
-        let ob = OrderBookData {
+    #[test]
+    fn test_to_lob_item_returns_none_when_asks_empty() {
+        let mut book = OrderBook::new();
+        book.apply_orderbook(&OrderBookData {
+            bids: vec![["100.0".into(), "1.0".into()]],
+            asks: vec![],
+            timestamp: "0".to_string(),
+            microtimestamp: "0".to_string(),
+        });
+        let result = book.to_lob_item(0, "test", None, 0.0);
+        assert!(result.is_none(), "Should return None when asks are empty");
+    }
+
+    #[test]
+    fn test_to_lob_item_filters_by_max_level() {
+        let mut book = OrderBook::new();
+        book.apply_orderbook(&OrderBookData {
             bids: vec![
                 ["100.0".into(), "1.0".into()],
                 ["99.0".into(), "2.0".into()],
                 ["98.0".into(), "3.0".into()],
                 ["97.0".into(), "4.0".into()],
-                ["96.0".into(), "5.0".into()],
             ],
-            asks: vec![],
-            timestamp: "0".to_string(),
-            microtimestamp: "0".to_string(),
-        };
-
-        let filtered = book.filter_orderbook(ob, &filter);
-        // Should only include first 3 levels (max_level=3)
-        assert_eq!(
-            filtered.bids.len(),
-            3,
-            "batch filter should respect max_level"
-        );
-        // Verify it's the best 3 prices (highest for bids)
-        assert!((filtered.bids[0][0].parse::<f64>().unwrap() - 100.0).abs() < f64::EPSILON);
-        assert!((filtered.bids[1][0].parse::<f64>().unwrap() - 99.0).abs() < f64::EPSILON);
-        assert!((filtered.bids[2][0].parse::<f64>().unwrap() - 98.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_filter_orderbook_batch_respects_max_level_asks() {
-        // Same test for asks side
-        let filter = LobFilter::MaxLevel(2);
-        let book = OrderBook::new();
-
-        let ob = OrderBookData {
-            bids: vec![],
             asks: vec![
                 ["101.0".into(), "1.0".into()],
                 ["102.0".into(), "2.0".into()],
                 ["103.0".into(), "3.0".into()],
-                ["104.0".into(), "4.0".into()],
             ],
             timestamp: "0".to_string(),
             microtimestamp: "0".to_string(),
-        };
-
-        let filtered = book.filter_orderbook(ob, &filter);
-        // Should only include first 2 levels (max_level=2)
-        assert_eq!(
-            filtered.asks.len(),
-            2,
-            "batch filter should respect max_level for asks"
-        );
-        // Verify it's the best 2 prices (lowest for asks)
-        assert!((filtered.asks[0][0].parse::<f64>().unwrap() - 101.0).abs() < f64::EPSILON);
-        assert!((filtered.asks[1][0].parse::<f64>().unwrap() - 102.0).abs() < f64::EPSILON);
+        });
+        let lob = book.to_lob_item(0, "test", Some(2), 0.0).unwrap();
+        assert_eq!(lob.bids.len(), 2, "Should have 2 bids with max_level=2");
+        assert_eq!(lob.asks.len(), 2, "Should have 2 asks with max_level=2");
     }
 
     #[test]
-    fn test_filter_orderbook_existing_price_always_included() {
-        // Existing price levels should always be included regardless of max_level
-        let filter = LobFilter::MaxLevel(1);
+    fn test_to_lob_item_sorts_bids_with_best_bid_last() {
         let mut book = OrderBook::new();
-        let ob = OrderBookData {
+        book.apply_orderbook(&OrderBookData {
             bids: vec![["100.0".into(), "1.0".into()]],
-            asks: vec![],
+            asks: vec![["101.0".into(), "1.0".into()]],
             timestamp: "0".to_string(),
             microtimestamp: "0".to_string(),
-        };
-        book.apply_orderbook(&ob);
-        assert_eq!(book.num_bids(), 1);
-
-        // Update existing level + add new level
-        let ob2 = OrderBookData {
-            bids: vec![
-                ["100.0".into(), "5.0".into()], // existing - should be included
-                ["99.0".into(), "2.0".into()], // new - should be filtered out (max=1, already have 1)
-            ],
-            asks: vec![],
+        });
+        // Add more bids to test sorting
+        book.apply_orderbook(&OrderBookData {
+            bids: vec![["100.0".into(), "1.0".into()]],
+            asks: vec![["101.0".into(), "1.0".into()]],
             timestamp: "0".to_string(),
             microtimestamp: "0".to_string(),
-        };
+        });
 
-        let filtered = book.filter_orderbook(ob2, &filter);
-        // Should include the existing price update, but not the new level
-        assert_eq!(filtered.bids.len(), 1);
-        assert!((filtered.bids[0][0].parse::<f64>().unwrap() - 100.0).abs() < f64::EPSILON);
+        // Manually add bids via apply_order
+        book.apply_order(&OrderEntry {
+            id: 1,
+            id_str: "1".to_string(),
+            price: "99.0".to_string(),
+            amount: "2.0".to_string(),
+            order_type: 0,
+            timestamp: "0".to_string(),
+        });
+        book.apply_order(&OrderEntry {
+            id: 2,
+            id_str: "2".to_string(),
+            price: "98.0".to_string(),
+            amount: "3.0".to_string(),
+            order_type: 0,
+            timestamp: "0".to_string(),
+        });
+
+        let lob = book.to_lob_item(0, "test", Some(10), 0.0).unwrap();
+        // Bids should be sorted ascending, best_bid (100.0) should be last
+        assert_eq!(lob.bids.len(), 3);
+        assert!((lob.bids[0].price - 98.0).abs() < f64::EPSILON);
+        assert!((lob.bids[1].price - 99.0).abs() < f64::EPSILON);
+        assert!(
+            (lob.bids[2].price - 100.0).abs() < f64::EPSILON,
+            "Best bid (100.0) should be last"
+        );
     }
 
     #[test]
-    fn test_filter_orderbook_with_existing_levels_respects_max_level() {
-        let filter = LobFilter::MaxLevel(2);
+    fn test_to_lob_item_sorts_asks_with_best_ask_first() {
         let mut book = OrderBook::new();
-        let ob = OrderBookData {
-            bids: vec![["100.0".into(), "1.0".into()]],
-            asks: vec![],
+        book.apply_order(&OrderEntry {
+            id: 1,
+            id_str: "1".to_string(),
+            price: "101.0".to_string(),
+            amount: "1.0".to_string(),
+            order_type: 1,
             timestamp: "0".to_string(),
-            microtimestamp: "0".to_string(),
-        };
-        book.apply_orderbook(&ob);
-        assert_eq!(book.num_bids(), 1);
-
-        let ob2 = OrderBookData {
-            bids: vec![
-                ["99.0".into(), "2.0".into()],
-                ["98.0".into(), "3.0".into()],
-                ["97.0".into(), "4.0".into()],
-            ],
-            asks: vec![],
+        });
+        book.apply_order(&OrderEntry {
+            id: 2,
+            id_str: "2".to_string(),
+            price: "102.0".to_string(),
+            amount: "2.0".to_string(),
+            order_type: 1,
             timestamp: "0".to_string(),
-            microtimestamp: "0".to_string(),
-        };
+        });
+        book.apply_order(&OrderEntry {
+            id: 3,
+            id_str: "3".to_string(),
+            price: "103.0".to_string(),
+            amount: "3.0".to_string(),
+            order_type: 1,
+            timestamp: "0".to_string(),
+        });
+        book.apply_order(&OrderEntry {
+            id: 0,
+            id_str: "0".to_string(),
+            price: "100.0".to_string(),
+            amount: "0.5".to_string(),
+            order_type: 0,
+            timestamp: "0".to_string(),
+        });
 
-        let filtered = book.filter_orderbook(ob2, &filter);
-        assert_eq!(
-            filtered.bids.len(),
-            1,
-            "only 1 new level fits within max_level=2 (1 existing + 1 new)"
+        let lob = book.to_lob_item(0, "test", Some(10), 0.0).unwrap();
+        // Asks should be sorted ascending, best_ask (101.0) should be first
+        assert_eq!(lob.asks.len(), 3);
+        assert!(
+            (lob.asks[0].price - 101.0).abs() < f64::EPSILON,
+            "Best ask (101.0) should be first"
         );
-        assert!((filtered.bids[0][0].parse::<f64>().unwrap() - 99.0).abs() < f64::EPSILON);
+        assert!((lob.asks[1].price - 102.0).abs() < f64::EPSILON);
+        assert!((lob.asks[2].price - 103.0).abs() < f64::EPSILON);
     }
 
     #[test]
-    fn test_filter_orderbook_existing_price_in_updates_included_always() {
-        let filter = LobFilter::MaxLevel(1);
+    fn test_to_lob_item_filters_by_max_level_pct() {
         let mut book = OrderBook::new();
-        let ob = OrderBookData {
+        book.apply_orderbook(&OrderBookData {
             bids: vec![["100.0".into(), "1.0".into()]],
-            asks: vec![],
+            asks: vec![["101.0".into(), "1.0".into()]],
             timestamp: "0".to_string(),
             microtimestamp: "0".to_string(),
-        };
-        book.apply_orderbook(&ob);
-        assert_eq!(book.num_bids(), 1);
-
-        let ob2 = OrderBookData {
-            bids: vec![
-                ["100.0".into(), "5.0".into()],
-                ["99.0".into(), "2.0".into()],
-            ],
-            asks: vec![],
+        });
+        // Add bids at -2% and -5% from best
+        book.apply_order(&OrderEntry {
+            id: 1,
+            id_str: "1".to_string(),
+            price: "98.0".to_string(),
+            amount: "2.0".to_string(),
+            order_type: 0,
             timestamp: "0".to_string(),
-            microtimestamp: "0".to_string(),
-        };
+        });
+        book.apply_order(&OrderEntry {
+            id: 2,
+            id_str: "2".to_string(),
+            price: "95.0".to_string(),
+            amount: "3.0".to_string(),
+            order_type: 0,
+            timestamp: "0".to_string(),
+        });
 
-        let filtered = book.filter_orderbook(ob2, &filter);
-        assert_eq!(
-            filtered.bids.len(),
-            1,
-            "existing price should always be included in updates"
-        );
-        assert!((filtered.bids[0][0].parse::<f64>().unwrap() - 100.0).abs() < f64::EPSILON);
+        let lob = book.to_lob_item(0, "test", None, 1.0).unwrap();
+        // With 1% tolerance, bid at 98.0 (100*0.99=99) should be excluded
+        // Only 95.0 and 100.0 should pass? Actually 95 < 99, so should be excluded
+        // Wait, let me re-check: 100 * (1 - 1/100) = 99.0
+        // So 98.0 < 99.0 and 95.0 < 99.0, both should be excluded
+        // Only 100.0 should remain
+        assert_eq!(lob.bids.len(), 1, "Should only have the best bid within 1%");
+        assert!((lob.bids[0].price - 100.0).abs() < f64::EPSILON);
     }
 }
