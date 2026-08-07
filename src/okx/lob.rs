@@ -273,22 +273,25 @@ impl OrderBook {
         side: Side,
         filter: &LobFilter,
     ) -> Vec<PriceLevel> {
+        let best_bid = self.best_bid();
+        let best_ask = self.best_ask();
+        let side_is_bid = side == Side::Bid;
+        let initial_levels_on_side = match side {
+            Side::Bid => self.num_bids(),
+            Side::Ask => self.num_asks(),
+        };
+        let mut included_in_batch = 0usize;
+
         levels
             .iter()
             .filter(|level| {
                 if let Some((price, amount)) = parse_price_level(level) {
-                    let best_bid = self.best_bid();
-                    let best_ask = self.best_ask();
-                    let side_is_bid = side == Side::Bid;
-                    let current_levels_on_side = match side {
-                        Side::Bid => self.num_bids(),
-                        Side::Ask => self.num_asks(),
-                    };
                     let price_exists = match side {
                         Side::Bid => self.bids.contains_key(&Reverse(OrderedFloat(price))),
                         Side::Ask => self.asks.contains_key(&OrderedFloat(price)),
                     };
-                    filter.should_include(
+                    let current_levels_on_side = initial_levels_on_side + included_in_batch;
+                    let include = filter.should_include(
                         best_bid,
                         best_ask,
                         price,
@@ -296,7 +299,11 @@ impl OrderBook {
                         side_is_bid,
                         current_levels_on_side,
                         price_exists,
-                    )
+                    );
+                    if include {
+                        included_in_batch += 1;
+                    }
+                    include
                 } else {
                     true
                 }
@@ -403,7 +410,7 @@ mod tests {
 
     #[test]
     fn test_new_book_empty() {
-        let book = OrderBook::new();
+        let mut book = OrderBook::new();
         assert_eq!(book.num_bids(), 0);
         assert_eq!(book.num_asks(), 0);
         assert_eq!(book.best_bid(), None);
@@ -493,7 +500,7 @@ mod tests {
 
     #[test]
     fn test_spread_empty() {
-        let book = OrderBook::new();
+        let mut book = OrderBook::new();
         assert_eq!(book.spread(), None);
     }
 
@@ -514,7 +521,7 @@ mod tests {
 
     #[test]
     fn test_display_empty_book() {
-        let book = OrderBook::new();
+        let mut book = OrderBook::new();
         let out = book.display("BTC-USDT", 0.1);
         assert!(out.contains("bids=0"));
         assert!(out.contains("asks=0"));
@@ -641,7 +648,7 @@ mod tests {
 
     #[test]
     fn test_levels_within_pct_empty_handling() {
-        let book = OrderBook::new();
+        let mut book = OrderBook::new();
         let (bids, asks) = book.levels_within_pct(0.1);
         assert!(bids.is_empty());
         assert!(asks.is_empty());
@@ -731,5 +738,74 @@ mod tests {
         let (price, amount) = result.unwrap();
         assert!((price - 100.0).abs() < f64::EPSILON);
         assert!((amount - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_filter_levels_batch_respects_max_level() {
+        // Test that filter_levels correctly limits the number of new levels
+        // added in a single batch, even when the book is empty.
+        // This prevents the bug where all levels in a batch would pass
+        // because current_levels_on_side was not updated per-level.
+        let filter = LobFilter::MaxLevel(3);
+        let book = OrderBook::new();
+
+        // Simulate a snapshot that clears the book (empty bids)
+        // Then an update with 5 bid levels
+        let updates = vec![
+            price_level("100.0", "1.0"),
+            price_level("99.0", "2.0"),
+            price_level("98.0", "3.0"),
+            price_level("97.0", "4.0"),
+            price_level("96.0", "5.0"),
+        ];
+
+        let filtered = book.filter_levels(&updates, Side::Bid, &filter);
+        // Should only include first 3 levels (max_level=3)
+        assert_eq!(filtered.len(), 3, "batch filter should respect max_level");
+        // Verify it's the best 3 prices (highest for bids)
+        assert!((filtered[0][0].parse::<f64>().unwrap() - 100.0).abs() < f64::EPSILON);
+        assert!((filtered[1][0].parse::<f64>().unwrap() - 99.0).abs() < f64::EPSILON);
+        assert!((filtered[2][0].parse::<f64>().unwrap() - 98.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_filter_levels_batch_respects_max_level_asks() {
+        // Same test for asks side
+        let filter = LobFilter::MaxLevel(2);
+        let book = OrderBook::new();
+
+        let updates = vec![
+            price_level("101.0", "1.0"),
+            price_level("102.0", "2.0"),
+            price_level("103.0", "3.0"),
+            price_level("104.0", "4.0"),
+        ];
+
+        let filtered = book.filter_levels(&updates, Side::Ask, &filter);
+        // Should only include first 2 levels (max_level=2)
+        assert_eq!(filtered.len(), 2, "batch filter should respect max_level for asks");
+        // Verify it's the best 2 prices (lowest for asks)
+        assert!((filtered[0][0].parse::<f64>().unwrap() - 101.0).abs() < f64::EPSILON);
+        assert!((filtered[1][0].parse::<f64>().unwrap() - 102.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_filter_levels_existing_price_always_included() {
+        // Existing price levels should always be included regardless of max_level
+        let filter = LobFilter::MaxLevel(1);
+        let mut book = OrderBook::new();
+        book.apply_snapshot(&[price_level("100.0", "1.0")], Side::Bid);
+        assert_eq!(book.num_bids(), 1);
+
+        // Update existing level + add new level
+        let updates = vec![
+            price_level("100.0", "5.0"), // existing - should be included
+            price_level("99.0", "2.0"),  // new - should be filtered out (max=1, already have 1)
+        ];
+
+        let filtered = book.filter_levels(&updates, Side::Bid, &filter);
+        // Should include the existing price update, but not the new level
+        assert_eq!(filtered.len(), 1);
+        assert!((filtered[0][0].parse::<f64>().unwrap() - 100.0).abs() < f64::EPSILON);
     }
 }
