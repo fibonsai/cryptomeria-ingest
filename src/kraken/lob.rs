@@ -366,7 +366,7 @@ mod tests {
 
     #[test]
     fn test_new_book_empty() {
-        let book = OrderBook::new();
+        let mut book = OrderBook::new();
         assert_eq!(book.num_bids(), 0);
         assert_eq!(book.num_asks(), 0);
     }
@@ -448,9 +448,12 @@ mod tests {
 
     #[test]
     fn test_filter_levels_batch_respects_max_level() {
+        // Test that filter_levels correctly limits the number of new levels
+        // added in a single batch, even when the book is empty.
         let filter = LobFilter::MaxLevel(3);
         let book = OrderBook::new();
 
+        // Simulate an update with 5 bid levels (book is empty)
         let updates = vec![
             (50000.0, 1.0),
             (49900.0, 2.0),
@@ -460,7 +463,9 @@ mod tests {
         ];
 
         let filtered = book.filter_levels(&updates, Side::Bid, &filter);
+        // Should only include first 3 levels (max_level=3)
         assert_eq!(filtered.len(), 3, "batch filter should respect max_level");
+        // Verify it's the best 3 prices (highest for bids)
         assert!((filtered[0].0 - 50000.0).abs() < f64::EPSILON);
         assert!((filtered[1].0 - 49900.0).abs() < f64::EPSILON);
         assert!((filtered[2].0 - 49800.0).abs() < f64::EPSILON);
@@ -479,17 +484,16 @@ mod tests {
         ];
 
         let filtered = book.filter_levels(&updates, Side::Ask, &filter);
-        assert_eq!(
-            filtered.len(),
-            2,
-            "batch filter should respect max_level for asks"
-        );
+        // Should only include first 2 levels (max_level=2)
+        assert_eq!(filtered.len(), 2, "batch filter should respect max_level for asks");
+        // Verify it's the best 2 prices (lowest for asks)
         assert!((filtered[0].0 - 50100.0).abs() < f64::EPSILON);
         assert!((filtered[1].0 - 50200.0).abs() < f64::EPSILON);
     }
 
     #[test]
     fn test_filter_levels_existing_price_always_included() {
+        // Existing price levels should always be included regardless of max_level
         let filter = LobFilter::MaxLevel(1);
         let mut book = OrderBook::new();
         book.apply_snapshot(&[(50000.0, 1.0)], Side::Bid);

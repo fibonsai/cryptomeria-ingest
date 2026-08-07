@@ -21,11 +21,13 @@ reqwest = { version = "0.13.4", features = ["json"] }
 fastrand = "2.0"
 
 clap = { version = "4", features = ["derive"] }
+toml = "0.8"
 
 [dev-dependencies]
 serde_test = "1"
 serial_test = "2.0"
 proptest = "1"
+toml = "0.8"
 
 [[bin]]
 name = "cryptomeria-ingest-demo"
@@ -44,6 +46,11 @@ harness = true
 [[test]]
 name = "bitstamp_integration"
 path = "tests/bitstamp_integration.rs"
+harness = true
+
+[[test]]
+name = "instrument_validation"
+path = "tests/instrument_validation.rs"
 harness = true
 
 [script]
