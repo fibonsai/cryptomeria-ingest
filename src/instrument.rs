@@ -1,9 +1,6 @@
 use crate::config::{DataSourceConfig, ExchangeFallbackMapping};
 use crate::items::IngestError;
-use crate::urls::rest_url;
 use reqwest::Client;
-use serde::Deserialize;
-use std::collections::HashSet;
 
 /// Exchange-specific validator enum (dyn-compatible).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,9 +29,13 @@ impl ExchangeValidator {
         instrument: &str,
     ) -> Result<(), IngestError> {
         match self {
-            ExchangeValidator::Okx => validate_okx(client, region, instrument).await,
-            ExchangeValidator::Kraken => validate_kraken(client, region, instrument).await,
-            ExchangeValidator::Bitstamp => validate_bitstamp(client, region, instrument).await,
+            ExchangeValidator::Okx => crate::okx::validate_okx(client, region, instrument).await,
+            ExchangeValidator::Kraken => {
+                crate::kraken::validate_kraken(client, region, instrument).await
+            }
+            ExchangeValidator::Bitstamp => {
+                crate::bitstamp::validate_bitstamp(client, region, instrument).await
+            }
         }
     }
 
@@ -48,160 +49,6 @@ impl ExchangeValidator {
         }
     }
 }
-
-/// Validate instrument on OKX.
-async fn validate_okx(client: &Client, region: &str, instrument: &str) -> Result<(), IngestError> {
-    let url = format!(
-        "{}/api/v5/public/instruments?instType=SPOT",
-        rest_url(region, "okx")
-    );
-    let response = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| IngestError::Config(format!("OKX HTTP request failed: {}", e)))?;
-
-    if !response.status().is_success() {
-        return Err(IngestError::Config(format!(
-            "OKX API error: {}",
-            response.status()
-        )));
-    }
-
-    let data: OkxInstrumentsResponse = response
-        .json()
-        .await
-        .map_err(|e| IngestError::Config(format!("OKX JSON parse failed: {}", e)))?;
-
-    if data.code != "0" {
-        return Err(IngestError::Config(format!("OKX API error: {}", data.msg)));
-    }
-
-    let instruments: HashSet<String> = data.data.into_iter().map(|i| i.inst_id).collect();
-
-    if instruments.contains(instrument) {
-        Ok(())
-    } else {
-        Err(IngestError::Config(format!(
-            "Instrument '{}' not found on OKX",
-            instrument
-        )))
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct OkxInstrumentsResponse {
-    code: String,
-    msg: String,
-    data: Vec<OkxInstrument>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OkxInstrument {
-    #[serde(rename = "instId")]
-    inst_id: String,
-}
-
-/// Validate instrument on Kraken.
-async fn validate_kraken(
-    client: &Client,
-    region: &str,
-    instrument: &str,
-) -> Result<(), IngestError> {
-    let url = format!("{}/0/public/AssetPairs", rest_url(region, "kraken"));
-    let response = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| IngestError::Config(format!("Kraken HTTP request failed: {}", e)))?;
-
-    if !response.status().is_success() {
-        return Err(IngestError::Config(format!(
-            "Kraken API error: {}",
-            response.status()
-        )));
-    }
-
-    let data: KrakenAssetPairsResponse = response
-        .json()
-        .await
-        .map_err(|e| IngestError::Config(format!("Kraken JSON parse failed: {}", e)))?;
-
-    if let Some(error) = data.error.first() {
-        return Err(IngestError::Config(format!("Kraken API error: {}", error)));
-    }
-
-    let instruments: HashSet<String> = data.result.keys().cloned().collect();
-
-    if instruments.contains(instrument) {
-        Ok(())
-    } else {
-        Err(IngestError::Config(format!(
-            "Instrument '{}' not found on Kraken",
-            instrument
-        )))
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct KrakenAssetPairsResponse {
-    error: Vec<String>,
-    result: std::collections::HashMap<String, KrakenAssetPair>,
-}
-
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-struct KrakenAssetPair {
-    #[serde(rename = "altname")]
-    altname: String,
-    #[serde(rename = "wsname")]
-    wsname: Option<String>,
-}
-
-/// Validate instrument on Bitstamp.
-async fn validate_bitstamp(
-    client: &Client,
-    region: &str,
-    instrument: &str,
-) -> Result<(), IngestError> {
-    let url = format!("{}/trading-pairs-info/", rest_url(region, "bitstamp"));
-    let response = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| IngestError::Config(format!("Bitstamp HTTP request failed: {}", e)))?;
-
-    if !response.status().is_success() {
-        return Err(IngestError::Config(format!(
-            "Bitstamp API error: {}",
-            response.status()
-        )));
-    }
-
-    let data: BitstampTradingPairsResponse = response
-        .json()
-        .await
-        .map_err(|e| IngestError::Config(format!("Bitstamp JSON parse failed: {}", e)))?;
-
-    let instruments: HashSet<String> = data.into_iter().map(|p| p.url_symbol).collect();
-
-    if instruments.contains(instrument) {
-        Ok(())
-    } else {
-        Err(IngestError::Config(format!(
-            "Instrument '{}' not found on Bitstamp",
-            instrument
-        )))
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct BitstampTradingPair {
-    #[serde(rename = "url_symbol")]
-    url_symbol: String,
-}
-
-type BitstampTradingPairsResponse = Vec<BitstampTradingPair>;
 
 /// Generate all fallback variants from the original instrument and mapping.
 pub fn generate_fallback_variants(
