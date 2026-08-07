@@ -26,6 +26,7 @@ pub fn display_message(msg: &KrakenWsMessage) -> String {
 pub struct KrakenAdapter {
     pub instrument: String,
     pub region: String,
+    exchange: &'static str,
     pub max_level_pct: f64,
     pub max_level: Option<usize>,
     pub snapshot_depth: usize,
@@ -51,6 +52,7 @@ impl KrakenAdapter {
         Self {
             instrument,
             region,
+            exchange: "kraken",
             max_level_pct,
             max_level,
             snapshot_depth,
@@ -76,7 +78,12 @@ impl KrakenAdapter {
                 size: *v,
             })
             .collect();
-        MarketDataItem::Lob(LobItem { ts, bids, asks })
+        MarketDataItem::Lob(LobItem {
+            ts,
+            exchange: self.exchange.to_string(),
+            bids,
+            asks,
+        })
     }
 }
 
@@ -125,6 +132,7 @@ impl ExchangeAdapter for KrakenAdapter {
                     };
                     Some(MarketDataItem::Trade(TradeItem {
                         ts,
+                        exchange: self.exchange.to_string(),
                         price: trade_raw.price,
                         size: trade_raw.qty,
                         side: trade_raw.side,
@@ -223,6 +231,7 @@ mod tests {
                 assert_eq!(t.price, 99.5);
                 assert_eq!(t.size, 3.0);
                 assert_eq!(t.side, "sell");
+                assert_eq!(t.exchange, "kraken");
                 assert_eq!(t.trade_id.as_deref(), Some("42"));
             }
             _ => panic!("expected Trade item"),

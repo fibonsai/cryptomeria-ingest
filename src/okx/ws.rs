@@ -26,6 +26,7 @@ pub fn display_message(msg: &OkxWsMessage) -> String {
 pub struct OkxAdapter {
     pub instrument: String,
     pub region: String,
+    exchange: &'static str,
     pub max_level_pct: f64,
     pub max_level: Option<usize>,
     pub snapshot_depth: usize,
@@ -51,6 +52,7 @@ impl OkxAdapter {
         Self {
             instrument,
             region,
+            exchange: "okx",
             max_level_pct,
             max_level,
             snapshot_depth,
@@ -76,7 +78,12 @@ impl OkxAdapter {
                 size: *v,
             })
             .collect();
-        MarketDataItem::Lob(LobItem { ts, bids, asks })
+        MarketDataItem::Lob(LobItem {
+            ts,
+            exchange: self.exchange.to_string(),
+            bids,
+            asks,
+        })
     }
 }
 
@@ -126,6 +133,7 @@ impl ExchangeAdapter for OkxAdapter {
                     };
                     Some(MarketDataItem::Trade(TradeItem {
                         ts,
+                        exchange: self.exchange.to_string(),
                         price,
                         size,
                         side: trade_raw.side,
@@ -229,6 +237,7 @@ mod tests {
                 assert_eq!(t.price, 100.5);
                 assert_eq!(t.size, 2.5);
                 assert_eq!(t.side, "buy");
+                assert_eq!(t.exchange, "okx");
                 assert_eq!(t.trade_id.as_deref(), Some("t1"));
             }
             _ => panic!("expected Trade item"),

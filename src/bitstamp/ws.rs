@@ -85,7 +85,12 @@ impl BitstampAdapter {
                 size: *v,
             })
             .collect();
-        MarketDataItem::Lob(LobItem { ts, bids, asks })
+        MarketDataItem::Lob(LobItem {
+            ts,
+            exchange: self.exchange.clone(),
+            bids,
+            asks,
+        })
     }
 
     /// Fetch the full order book snapshot via REST for initial sync and reconnect recovery.
@@ -175,6 +180,7 @@ impl ExchangeAdapter for BitstampAdapter {
                     };
                     Some(MarketDataItem::Trade(TradeItem {
                         ts,
+                        exchange: self.exchange.clone(),
                         price,
                         size,
                         side: trade_raw.side(),
@@ -268,6 +274,7 @@ mod tests {
                 assert_eq!(t.price, 101.0);
                 assert_eq!(t.size, 2.5);
                 assert_eq!(t.side, "buy");
+                assert_eq!(t.exchange, "bitstamp");
                 assert_eq!(t.trade_id.as_deref(), Some("5"));
             }
             _ => panic!("expected Trade item"),

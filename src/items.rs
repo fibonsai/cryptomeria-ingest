@@ -4,6 +4,7 @@ use std::fmt;
 
 /// Normalized market data item emitted by `stream()`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum MarketDataItem {
     /// Limit Order Book snapshot or incremental update.
     Lob(LobItem),
@@ -27,6 +28,8 @@ impl MarketDataItem {
 pub struct LobItem {
     /// Exchange timestamp in milliseconds since epoch.
     pub ts: u64,
+    /// Source exchange name (e.g. "okx", "kraken", "bitstamp").
+    pub exchange: String,
     /// Bid levels: price, size; sorted descending (best bid first).
     pub bids: Vec<LobLevel>,
     /// Ask levels: price, size; sorted ascending (best ask first).
@@ -36,7 +39,9 @@ pub struct LobItem {
 /// Single price level in the LOB.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LobLevel {
+    #[serde(rename = "p")]
     pub price: f64,
+    #[serde(rename = "s")]
     pub size: f64,
 }
 
@@ -45,6 +50,8 @@ pub struct LobLevel {
 pub struct TradeItem {
     /// Exchange timestamp in milliseconds since epoch.
     pub ts: u64,
+    /// Source exchange name (e.g. "okx", "kraken", "bitstamp").
+    pub exchange: String,
     /// Trade price.
     pub price: f64,
     /// Trade size (quantity).
@@ -126,6 +133,7 @@ mod tests {
     fn test_market_data_item_timestamp_lob() {
         let item = MarketDataItem::Lob(LobItem {
             ts: 123,
+            exchange: "okx".into(),
             bids: vec![],
             asks: vec![],
         });
@@ -133,9 +141,64 @@ mod tests {
     }
 
     #[test]
+    fn test_market_data_item_serializes_variant_keys_lowercase() {
+        let lob = MarketDataItem::Lob(LobItem {
+            ts: 1,
+            exchange: "okx".into(),
+            bids: vec![],
+            asks: vec![],
+        });
+        let trade = MarketDataItem::Trade(TradeItem {
+            ts: 2,
+            exchange: "okx".into(),
+            price: 100.0,
+            size: 1.0,
+            side: "buy".into(),
+            trade_id: None,
+            seq_id: None,
+        });
+        let lob_json: serde_json::Value = serde_json::to_value(&lob).unwrap();
+        let trade_json: serde_json::Value = serde_json::to_value(&trade).unwrap();
+        assert_eq!(lob_json.as_object().unwrap().keys().next().unwrap(), "lob");
+        assert_eq!(
+            trade_json.as_object().unwrap().keys().next().unwrap(),
+            "trade"
+        );
+    }
+
+    #[test]
+    fn test_lob_level_serializes_compact_p_s_keys() {
+        let level = LobLevel {
+            price: 100.5,
+            size: 2.0,
+        };
+        let level_json: serde_json::Value = serde_json::to_value(&level).unwrap();
+        assert_eq!(level_json["p"], 100.5);
+        assert_eq!(level_json["s"], 2.0);
+        assert!(level_json.get("price").is_none());
+        assert!(level_json.get("size").is_none());
+    }
+
+    #[test]
+    fn test_market_data_item_serializes_exchange_field() {
+        let lob: MarketDataItem =
+            serde_json::from_str(r#"{"lob":{"ts":1,"bids":[],"asks":[],"exchange":"okx"}}"#)
+                .unwrap();
+        let trade: MarketDataItem = serde_json::from_str(
+            r#"{"trade":{"ts":2,"price":100.0,"size":1.0,"side":"buy","exchange":"okx"}}"#,
+        )
+        .unwrap();
+        let lob_json: serde_json::Value = serde_json::to_value(&lob).unwrap();
+        let trade_json: serde_json::Value = serde_json::to_value(&trade).unwrap();
+        assert_eq!(lob_json["lob"]["exchange"], "okx");
+        assert_eq!(trade_json["trade"]["exchange"], "okx");
+    }
+
+    #[test]
     fn test_market_data_item_timestamp_trade() {
         let item = MarketDataItem::Trade(TradeItem {
             ts: 456,
+            exchange: "okx".into(),
             price: 100.0,
             size: 1.0,
             side: "buy".into(),
