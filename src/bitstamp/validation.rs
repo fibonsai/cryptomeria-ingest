@@ -6,11 +6,8 @@ use serde::Deserialize;
 use std::collections::HashSet;
 
 /// Validate instrument on Bitstamp.
-pub async fn validate_instrument(
-    client: &Client,
-    region: &str,
-    instrument: &str,
-) -> Result<(), IngestError> {
+pub async fn validate_instrument(region: &str, instrument: &str) -> Result<(), IngestError> {
+    let client = Client::new();
     let url = format!("{}/trading-pairs-info/", rest_url(region, "bitstamp"));
     let response = client
         .get(&url)

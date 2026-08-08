@@ -292,7 +292,7 @@ let config = DataSourceConfig {
 
 The flow is:
 
-1. The `stream()` calls `validate_with_fallback()`, which makes a REST API call to the exchange to confirm the instrument actually exists.
+1. The `stream()` calls `validate_with_fallback()`, which confirms the instrument exists on the exchange — via REST for OKX/Bitstamp and via the Kraken WebSocket v2 `instrument` channel for Kraken (to stay consistent with WS v2 symbol names).
 2. If the primary instrument is rejected, fallback mappings generate candidate variants (see below) and each is tried until one is accepted.
 3. If no variant succeeds, `stream()` returns `IngestError::Config`.
 

@@ -1,5 +1,3 @@
-
-
 /// Type alias for a single vector of (price, size) levels.
 pub type LevelVec = Vec<(f64, f64)>;
 /// Type alias for the (bids, asks) return type of `levels_within_pct`.

@@ -1,6 +1,5 @@
 use crate::config::{DataSourceConfig, ExchangeFallbackMapping};
 use crate::items::IngestError;
-use reqwest::Client;
 use std::collections::HashMap;
 
 /// Exchange-specific validator enum (dyn-compatible).
@@ -25,17 +24,14 @@ impl ExchangeValidator {
     /// Returns Ok(()) if valid, Err if not found.
     pub async fn validate_instrument(
         &self,
-        client: &Client,
         region: &str,
         instrument: &str,
     ) -> Result<(), IngestError> {
         match self {
-            ExchangeValidator::Okx => crate::okx::validate_okx(client, region, instrument).await,
-            ExchangeValidator::Kraken => {
-                crate::kraken::validate_kraken(client, region, instrument).await
-            }
+            ExchangeValidator::Okx => crate::okx::validate_okx(region, instrument).await,
+            ExchangeValidator::Kraken => crate::kraken::validate_kraken(region, instrument).await,
             ExchangeValidator::Bitstamp => {
-                crate::bitstamp::validate_bitstamp(client, region, instrument).await
+                crate::bitstamp::validate_bitstamp(region, instrument).await
             }
         }
     }
@@ -104,16 +100,13 @@ pub fn select_fallback_mapping<'a>(
 
 /// Validate instrument with fallback mapping.
 /// Returns the validated instrument (original or fallback) or an error.
-pub async fn validate_with_fallback(
-    config: &DataSourceConfig,
-    client: &Client,
-) -> Result<String, IngestError> {
+pub async fn validate_with_fallback(config: &DataSourceConfig) -> Result<String, IngestError> {
     let validator = ExchangeValidator::from_exchange_name(&config.exchange)
         .ok_or_else(|| IngestError::Config(format!("Unknown exchange: {}", config.exchange)))?;
 
     // First, try the original instrument
     match validator
-        .validate_instrument(client, &config.region, &config.instrument)
+        .validate_instrument(&config.region, &config.instrument)
         .await
     {
         Ok(()) => return Ok(config.instrument.clone()),
@@ -135,7 +128,7 @@ pub async fn validate_with_fallback(
 
         for variant in variants {
             match validator
-                .validate_instrument(client, &config.region, &variant)
+                .validate_instrument(&config.region, &variant)
                 .await
             {
                 Ok(()) => {

@@ -411,7 +411,7 @@ mod tests {
 
     #[test]
     fn test_new_book_empty() {
-        let mut book = OrderBook::new();
+        let book = OrderBook::new();
         assert_eq!(book.num_bids(), 0);
         assert_eq!(book.num_asks(), 0);
     }
