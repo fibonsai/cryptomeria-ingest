@@ -14,6 +14,18 @@ pub fn build_subscribe_msg(channel: &str, instrument: &str) -> String {
     .to_string()
 }
 
+/// Subscribe message builder for the WS v2 `instrument` channel (validation).
+///
+/// Unlike the `book`/`trade` channels, the `instrument` channel takes no
+/// symbol filter — it returns the full instrument reference list.
+pub fn build_instrument_subscribe_msg() -> String {
+    serde_json::json!({
+        "method": "subscribe",
+        "params": {"channel": "instrument"}
+    })
+    .to_string()
+}
+
 /// Format a message for terminal display — pure function, testable without I/O.
 pub fn display_message(msg: &KrakenWsMessage) -> String {
     let now = msg.formatted_time();
@@ -133,6 +145,13 @@ impl ExchangeAdapter for KrakenAdapter {
                 }
             }
             MessageType::Heartbeat | MessageType::Status => None,
+            MessageType::Instrument => {
+                logger.log(
+                    Level::Info,
+                    &format!("[kraken] instrument channel: {}", msg.summary()),
+                );
+                None
+            }
             MessageType::Event => {
                 logger.log(Level::Info, &format!("[kraken] event: {}", msg.summary()));
                 None
@@ -174,6 +193,18 @@ mod tests {
         assert_eq!(v["method"], "subscribe");
         assert_eq!(v["params"]["channel"], "book");
         assert_eq!(v["params"]["symbol"][0], "BTC/USD");
+    }
+
+    #[test]
+    fn test_build_instrument_subscribe_msg() {
+        let msg = build_instrument_subscribe_msg();
+        let v: serde_json::Value = serde_json::from_str(&msg).unwrap();
+        assert_eq!(v["method"], "subscribe");
+        assert_eq!(v["params"]["channel"], "instrument");
+        assert!(
+            v["params"].get("symbol").is_none(),
+            "instrument channel must not filter by symbol"
+        );
     }
 
     #[test]

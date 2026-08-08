@@ -389,7 +389,7 @@ mod tests {
 
     #[test]
     fn test_new_book_empty() {
-        let mut book = OrderBook::new();
+        let book = OrderBook::new();
         assert_eq!(book.num_bids(), 0);
         assert_eq!(book.num_asks(), 0);
         assert_eq!(book.best_bid(), None);
@@ -479,7 +479,7 @@ mod tests {
 
     #[test]
     fn test_spread_empty() {
-        let mut book = OrderBook::new();
+        let book = OrderBook::new();
         assert_eq!(book.spread(), None);
     }
 
@@ -500,7 +500,7 @@ mod tests {
 
     #[test]
     fn test_display_empty_book() {
-        let mut book = OrderBook::new();
+        let book = OrderBook::new();
         let out = book.display("BTC-USDT", 0.1);
         assert!(out.contains("bids=0"));
         assert!(out.contains("asks=0"));
@@ -627,7 +627,7 @@ mod tests {
 
     #[test]
     fn test_levels_within_pct_empty_handling() {
-        let mut book = OrderBook::new();
+        let book = OrderBook::new();
         let (bids, asks) = book.levels_within_pct(0.1);
         assert!(bids.is_empty());
         assert!(asks.is_empty());
@@ -718,7 +718,6 @@ mod tests {
         assert!((amount - 0.0).abs() < f64::EPSILON);
     }
 
-    #[test]
     #[test]
     fn test_to_lob_item_returns_none_when_empty() {
         let book = OrderBook::new();

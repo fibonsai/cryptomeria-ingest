@@ -11,7 +11,7 @@ pub struct KrakenWsMessage {
     #[serde(rename = "type")]
     pub msg_type: Option<String>,
 
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_data")]
     pub data: Vec<serde_json::Value>,
 
     #[serde(default)]
@@ -31,6 +31,7 @@ pub enum MessageType {
     L2Update,
     L2,
     Trade,
+    Instrument,
     Heartbeat,
     Status,
     Event,
@@ -47,6 +48,7 @@ impl KrakenWsMessage {
                 _ => MessageType::L2,
             },
             Some("trade") => MessageType::Trade,
+            Some("instrument") => MessageType::Instrument,
             Some("heartbeat") => MessageType::Heartbeat,
             Some("status") => MessageType::Status,
             Some(_) => MessageType::Unknown,
@@ -70,6 +72,7 @@ impl KrakenWsMessage {
             MessageType::L2Update => "LOB2 UPDATE",
             MessageType::L2 => "LOB2",
             MessageType::Trade => "TRADE",
+            MessageType::Instrument => "INSTRUMENT",
             MessageType::Unknown => "UNKNOWN",
         }
     }
@@ -104,6 +107,14 @@ impl KrakenWsMessage {
                     format!("{} (raw)", inst)
                 }
             }
+            "INSTRUMENT" => {
+                let pair_count = self
+                    .data
+                    .first()
+                    .and_then(|d| d.get("pairs").and_then(|p| p.as_array()).map(|a| a.len()))
+                    .unwrap_or(0);
+                format!("instrument snapshot: {} pairs", pair_count)
+            }
             "HEARTBEAT" => "heartbeat".to_string(),
             "STATUS" => "status".to_string(),
             "EVENT" => {
@@ -125,6 +136,31 @@ impl KrakenWsMessage {
     /// Parse a JSON string into a `KrakenWsMessage`.
     pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(json)
+    }
+
+    /// Parse a raw JSON string from the WS v2 `instrument` channel snapshot and
+    /// extract all pair symbols (`data.pairs[].symbol`).
+    ///
+    /// Returns `None` when the payload is not an instrument snapshot (e.g. a
+    /// subscribe acknowledgement or a non-instrument message).
+    ///
+    /// This is a pure function — testable without I/O.
+    pub fn instrument_symbols(json: &str) -> Option<std::collections::HashSet<String>> {
+        let value: serde_json::Value = serde_json::from_str(json).ok()?;
+        let channel = value.get("channel")?.as_str()?;
+        if channel != "instrument" {
+            return None;
+        }
+        let msg_type = value.get("type")?.as_str()?;
+        if msg_type != "snapshot" {
+            return None;
+        }
+        let pairs = value.get("data")?.get("pairs")?.as_array()?;
+        let symbols: std::collections::HashSet<String> = pairs
+            .iter()
+            .filter_map(|p| p.get("symbol")?.as_str().map(|s| s.to_string()))
+            .collect();
+        Some(symbols)
     }
 
     /// Extract the exchange timestamp (milliseconds since epoch) from the data.
@@ -183,6 +219,44 @@ impl KrakenWsMessage {
             .first()
             .and_then(|d| serde_json::from_value(d.clone()).ok())
     }
+}
+
+/// Deserialize the `data` field which may arrive as a JSON array (book, trade)
+/// or as a single JSON object (instrument snapshot/update). Object values are
+/// wrapped in a single-element vector so callers can uniformly use `data.first()`.
+fn deserialize_data<'de, D>(deserializer: D) -> Result<Vec<serde_json::Value>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de;
+    struct DataVisitor;
+    impl<'de> de::Visitor<'de> for DataVisitor {
+        type Value = Vec<serde_json::Value>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a JSON array or object")
+        }
+        fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(vec![])
+        }
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: de::SeqAccess<'de>,
+        {
+            let mut items = Vec::new();
+            while let Some(el) = seq.next_element()? {
+                items.push(el);
+            }
+            Ok(items)
+        }
+        fn visit_map<M>(self, map: M) -> Result<Self::Value, M::Error>
+        where
+            M: de::MapAccess<'de>,
+        {
+            let value = serde_json::Value::deserialize(de::value::MapAccessDeserializer::new(map))?;
+            Ok(vec![value])
+        }
+    }
+    deserializer.deserialize_any(DataVisitor)
 }
 
 fn deserialize_number_or_string<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -522,5 +596,69 @@ mod tests {
         let ts = "1705314600.000";
         let ms = parse_kraken_timestamp(ts);
         assert_eq!(ms, Some(1705314600000));
+    }
+
+    #[test]
+    fn test_message_type_instrument() {
+        let json = r#"{
+            "channel": "instrument",
+            "type": "snapshot",
+            "data": {"pairs": [{"symbol": "BTC/USD"}]}
+        }"#;
+        let msg = KrakenWsMessage::from_json(json).unwrap();
+        assert_eq!(msg.message_type(), MessageType::Instrument);
+        assert_eq!(msg.display_type(), "INSTRUMENT");
+    }
+
+    #[test]
+    fn test_instrument_symbols_extracts_all_pairs() {
+        let json = r#"{
+            "channel": "instrument",
+            "type": "snapshot",
+            "data": {
+                "assets": [{"id": "USD"}],
+                "pairs": [
+                    {"symbol": "BTC/USD", "base": "BTC", "quote": "USD"},
+                    {"symbol": "ETH/USD", "base": "ETH", "quote": "USD"},
+                    {"symbol": "XRP/USD", "base": "XRP", "quote": "USD"}
+                ]
+            }
+        }"#;
+        let symbols = KrakenWsMessage::instrument_symbols(json).unwrap();
+        assert_eq!(symbols.len(), 3);
+        assert!(symbols.contains("BTC/USD"));
+        assert!(symbols.contains("ETH/USD"));
+        assert!(symbols.contains("XRP/USD"));
+    }
+
+    #[test]
+    fn test_instrument_symbols_returns_none_for_non_instrument_message() {
+        let json = r#"{
+            "channel": "book",
+            "type": "snapshot",
+            "data": [{"symbol": "BTC/USD"}]
+        }"#;
+        assert!(KrakenWsMessage::instrument_symbols(json).is_none());
+    }
+
+    #[test]
+    fn test_instrument_symbols_returns_none_for_subscribe_ack() {
+        let json = r#"{
+            "method": "subscribe",
+            "result": {"channel": "instrument"},
+            "success": true
+        }"#;
+        assert!(KrakenWsMessage::instrument_symbols(json).is_none());
+    }
+
+    #[test]
+    fn test_instrument_symbols_handles_empty_pairs() {
+        let json = r#"{
+            "channel": "instrument",
+            "type": "snapshot",
+            "data": {"assets": [], "pairs": []}
+        }"#;
+        let symbols = KrakenWsMessage::instrument_symbols(json).unwrap();
+        assert!(symbols.is_empty());
     }
 }
