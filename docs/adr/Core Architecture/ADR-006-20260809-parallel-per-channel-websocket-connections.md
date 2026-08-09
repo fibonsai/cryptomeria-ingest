@@ -6,7 +6,7 @@ Core Architecture
 
 ## Status
 
-Proposed
+Accepted — implemented in <https://github.com/fibonsai/cryptomeria-ingest/pull/40>
 
 ## Created
 
