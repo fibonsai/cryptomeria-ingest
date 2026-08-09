@@ -21,6 +21,9 @@ pub struct KrakenWsMessage {
     pub success: Option<bool>,
 
     #[serde(default)]
+    pub sequence: Option<u64>,
+
+    #[serde(default)]
     pub error: Option<serde_json::Value>,
 }
 
@@ -419,6 +422,7 @@ mod tests {
         let json = r#"{
             "channel": "trade",
             "type": "snapshot",
+            "sequence": 100,
             "data": [{
                 "symbol": "XBT/USD",
                 "side": "buy",
@@ -430,6 +434,7 @@ mod tests {
         }"#;
         let msg = KrakenWsMessage::from_json(json).unwrap();
         assert_eq!(msg.display_type(), "TRADE");
+        assert_eq!(msg.sequence, Some(100));
         let t: TradeData = serde_json::from_value(msg.data[0].clone()).unwrap();
         assert!((t.price - 50000.0).abs() < f64::EPSILON);
         assert_eq!(t.side, "buy");

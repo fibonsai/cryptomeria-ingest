@@ -153,7 +153,7 @@ impl ExchangeAdapter for KrakenAdapter {
                         size: trade_raw.qty,
                         side: trade_raw.side,
                         trade_id,
-                        seq_id: None,
+                        seq_id: msg.sequence,
                     }))
                 } else {
                     logger.log(Level::Warning, "[kraken] failed to parse trade data");
@@ -294,7 +294,7 @@ mod tests {
     fn test_handle_message_trade() {
         let mut a = adapter();
         let msg: KrakenWsMessage = serde_json::from_str(
-            r#"{"channel":"trade","data":[{"symbol":"BTC/USD","price":99.5,"qty":3.0,"side":"sell","trade_id":42,"timestamp":"0"}]}"#,
+            r#"{"channel":"trade","sequence":42,"data":[{"symbol":"BTC/USD","price":99.5,"qty":3.0,"side":"sell","trade_id":42,"timestamp":"0"}]}"#,
         )
         .unwrap();
         let item = a.handle_message(&msg).expect("expected trade item");
@@ -305,6 +305,7 @@ mod tests {
                 assert_eq!(t.side, "sell");
                 assert_eq!(t.exchange, "kraken");
                 assert_eq!(t.trade_id.as_deref(), Some("42"));
+                assert_eq!(t.seq_id, Some(42));
             }
             _ => panic!("expected Trade item"),
         }

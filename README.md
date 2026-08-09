@@ -153,7 +153,7 @@ Trade execution.
 | `size` | `f64` | Trade size (quantity) |
 | `side` | `String` | `"buy"` or `"sell"` |
 | `trade_id` | `Option<String>` | Exchange-specific trade ID (if available) |
-| `seq_id` | `Option<u64>` | Exchange-specific sequence ID (if available) |
+| `seq_id` | `Option<u64>` | Exchange-specific sequence ID (OKX: `data[0].seq`, Kraken: top-level `sequence`, Bitstamp: synthetic counter) |
 
 ### `stream(config) -> Stream<Item = Result<MarketDataItem, IngestError>>`
 
@@ -170,7 +170,7 @@ Items serialize with lowercase variant keys and an `exchange` field; LOB levels 
 
 ```json
 {"lob":{"ts":1700000000000,"exchange":"okx","bids":[{"p":100.5,"s":2.0}],"asks":[{"p":101.0,"s":1.5}]}}
-{"trade":{"ts":1700000000000,"exchange":"okx","price":100.5,"size":2.0,"side":"buy","trade_id":"t1","seq_id":null}}
+{"trade":{"ts":1700000000000,"exchange":"okx","price":100.5,"size":2.0,"side":"buy","trade_id":"t1","seq_id":99}}
 ```
 
 ## Usage Examples
