@@ -27,6 +27,7 @@ pub async fn stream(
                 config.max_level_pct,
                 config.max_level,
                 config.snapshot_depth,
+                config.data_kind,
             );
             run_exchange_stream(config, adapter).await?
         }
@@ -37,6 +38,7 @@ pub async fn stream(
                 config.max_level_pct,
                 config.max_level,
                 config.snapshot_depth,
+                config.data_kind,
             );
             run_exchange_stream(config, adapter).await?
         }
@@ -49,6 +51,7 @@ pub async fn stream(
                 config.max_level_pct,
                 config.max_level,
                 config.snapshot_depth,
+                config.data_kind,
             );
             run_exchange_stream(config, adapter).await?
         }

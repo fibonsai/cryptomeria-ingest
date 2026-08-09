@@ -1,5 +1,6 @@
 //! Exchange-specific subscription-building integration-style tests for Kraken.
 
+use cryptomeria_ingest::DataKind;
 use cryptomeria_ingest::wsloop::ExchangeAdapter;
 
 #[test]
@@ -19,6 +20,7 @@ fn kraken_adapter_subscribe_msgs_covers_book_and_trade() {
         0.0,
         None,
         400,
+        DataKind::LOB | DataKind::TRADE,
     );
     let msgs = adapter.subscribe_msgs();
     assert_eq!(msgs.len(), 2);
@@ -32,6 +34,36 @@ fn kraken_adapter_subscribe_msgs_covers_book_and_trade() {
 }
 
 #[test]
+fn kraken_adapter_subscribe_msgs_lob_only() {
+    let adapter = cryptomeria_ingest::kraken::KrakenAdapter::new(
+        "XBT/USD".into(),
+        "global".into(),
+        0.0,
+        None,
+        400,
+        DataKind::LOB,
+    );
+    let msgs = adapter.subscribe_msgs();
+    assert_eq!(msgs.len(), 1);
+    assert!(msgs[0].contains("book"));
+}
+
+#[test]
+fn kraken_adapter_subscribe_msgs_trade_only() {
+    let adapter = cryptomeria_ingest::kraken::KrakenAdapter::new(
+        "XBT/USD".into(),
+        "global".into(),
+        0.0,
+        None,
+        400,
+        DataKind::TRADE,
+    );
+    let msgs = adapter.subscribe_msgs();
+    assert_eq!(msgs.len(), 1);
+    assert!(msgs[0].contains("trade"));
+}
+
+#[test]
 fn kraken_url_for_region() {
     let adapter = cryptomeria_ingest::kraken::KrakenAdapter::new(
         "XBT/USD".into(),
@@ -39,6 +71,7 @@ fn kraken_url_for_region() {
         0.0,
         None,
         400,
+        DataKind::LOB | DataKind::TRADE,
     );
     assert!(adapter.url().contains("wss://"));
 }

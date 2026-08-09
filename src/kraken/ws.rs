@@ -1,3 +1,4 @@
+use crate::config::DataKind;
 use crate::items::{LobItem, MarketDataItem, TradeItem};
 use crate::kraken::lob::OrderBook;
 use crate::kraken::types::{KrakenWsMessage, MessageType, TradeData};
@@ -42,6 +43,7 @@ pub struct KrakenAdapter {
     pub max_level_pct: f64,
     pub max_level: Option<usize>,
     pub snapshot_depth: usize,
+    pub data_kind: DataKind,
     book: OrderBook,
     prev_lob: Option<LobItem>, // Track previous LOB for duplicate detection
 }
@@ -53,6 +55,7 @@ impl KrakenAdapter {
         max_level_pct: f64,
         max_level: Option<usize>,
         snapshot_depth: usize,
+        data_kind: DataKind,
     ) -> Self {
         Self {
             instrument,
@@ -61,6 +64,7 @@ impl KrakenAdapter {
             max_level_pct,
             max_level,
             snapshot_depth,
+            data_kind,
             book: OrderBook::new(),
             prev_lob: None,
         }
@@ -94,10 +98,14 @@ impl ExchangeAdapter for KrakenAdapter {
     }
 
     fn subscribe_msgs(&self) -> Vec<String> {
-        vec![
-            build_subscribe_msg("book", &self.instrument),
-            build_subscribe_msg("trade", &self.instrument),
-        ]
+        let mut msgs = Vec::new();
+        if self.data_kind.contains(DataKind::LOB) {
+            msgs.push(build_subscribe_msg("book", &self.instrument));
+        }
+        if self.data_kind.contains(DataKind::TRADE) {
+            msgs.push(build_subscribe_msg("trade", &self.instrument));
+        }
+        msgs
     }
 
     fn parse_message(&self, text: &str) -> Result<Self::Message, String> {
@@ -108,6 +116,9 @@ impl ExchangeAdapter for KrakenAdapter {
         let mut logger = log().lock().unwrap();
         match msg.message_type() {
             MessageType::L2Snapshot | MessageType::L2Update | MessageType::L2 => {
+                if !self.data_kind.contains(DataKind::LOB) {
+                    return None;
+                }
                 let ts = msg.timestamp_ms().unwrap_or_else(|| {
                     std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -119,6 +130,9 @@ impl ExchangeAdapter for KrakenAdapter {
                 self.emit_lob(ts)
             }
             MessageType::Trade => {
+                if !self.data_kind.contains(DataKind::TRADE) {
+                    return None;
+                }
                 if let Some(trade_raw) = msg
                     .data
                     .first()
@@ -183,7 +197,18 @@ mod tests {
     use super::*;
 
     fn adapter() -> KrakenAdapter {
-        KrakenAdapter::new("XBT/USD".into(), "global".into(), 0.0, None, 400)
+        KrakenAdapter::new(
+            "XBT/USD".into(),
+            "global".into(),
+            0.0,
+            None,
+            400,
+            DataKind::LOB | DataKind::TRADE,
+        )
+    }
+
+    fn adapter_with_kind(data_kind: DataKind) -> KrakenAdapter {
+        KrakenAdapter::new("XBT/USD".into(), "global".into(), 0.0, None, 400, data_kind)
     }
 
     #[test]
@@ -214,6 +239,22 @@ mod tests {
         assert_eq!(msgs.len(), 2);
         assert!(msgs[0].contains("\"book\""));
         assert!(msgs[1].contains("\"trade\""));
+    }
+
+    #[test]
+    fn test_subscribe_msgs_lob_only() {
+        let a = adapter_with_kind(DataKind::LOB);
+        let msgs = a.subscribe_msgs();
+        assert_eq!(msgs.len(), 1);
+        assert!(msgs[0].contains("\"book\""));
+    }
+
+    #[test]
+    fn test_subscribe_msgs_trade_only() {
+        let a = adapter_with_kind(DataKind::TRADE);
+        let msgs = a.subscribe_msgs();
+        assert_eq!(msgs.len(), 1);
+        assert!(msgs[0].contains("\"trade\""));
     }
 
     #[test]
@@ -265,6 +306,26 @@ mod tests {
         let mut a = adapter();
         let msg: KrakenWsMessage =
             serde_json::from_str(r#"{"channel":"trade","data":[]}"#).unwrap();
+        assert!(a.handle_message(&msg).is_none());
+    }
+
+    #[test]
+    fn test_handle_message_trade_filtered_when_lob_only() {
+        let mut a = adapter_with_kind(DataKind::LOB);
+        let msg: KrakenWsMessage = serde_json::from_str(
+            r#"{"channel":"trade","data":[{"symbol":"BTC/USD","price":99.5,"qty":3.0,"side":"sell","trade_id":42,"timestamp":"0"}]}"#,
+        )
+        .unwrap();
+        assert!(a.handle_message(&msg).is_none());
+    }
+
+    #[test]
+    fn test_handle_message_lob_filtered_when_trade_only() {
+        let mut a = adapter_with_kind(DataKind::TRADE);
+        let msg: KrakenWsMessage = serde_json::from_str(
+            r#"{"channel":"book","type":"snapshot","data":[{"symbol":"XBT/USD","bids":[{"price":50000.0,"qty":1.0}],"asks":[{"price":50100.0,"qty":1.0}],"timestamp":"2024-01-15T10:30:00.000000Z"}]}"#,
+        )
+        .unwrap();
         assert!(a.handle_message(&msg).is_none());
     }
 
