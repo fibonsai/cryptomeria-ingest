@@ -81,6 +81,8 @@ pub enum IngestError {
     ChannelClosed,
     /// Heartbeat/ping failed.
     Heartbeat(String),
+    /// WebSocket channel was silent for longer than the configured timeout.
+    SilenceTimeout(u64),
     /// Exchange-specific error.
     Exchange(String),
     /// I/O error.
@@ -99,6 +101,7 @@ impl fmt::Display for IngestError {
             }
             IngestError::ChannelClosed => write!(f, "channel closed"),
             IngestError::Heartbeat(s) => write!(f, "heartbeat error: {s}"),
+            IngestError::SilenceTimeout(s) => write!(f, "silence timeout after {s}s"),
             IngestError::Exchange(s) => write!(f, "exchange error: {s}"),
             IngestError::Io(s) => write!(f, "I/O error: {s}"),
         }
@@ -237,6 +240,10 @@ mod tests {
             "exchange error: x"
         );
         assert_eq!(IngestError::Io("x".into()).to_string(), "I/O error: x");
+        assert_eq!(
+            IngestError::SilenceTimeout(30).to_string(),
+            "silence timeout after 30s"
+        );
     }
 
     #[test]
