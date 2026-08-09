@@ -1,6 +1,7 @@
 //! Exchange-specific subscription-building integration-style tests for Kraken.
 
 use cryptomeria_ingest::DataKind;
+use cryptomeria_ingest::MarketDataItem;
 use cryptomeria_ingest::wsloop::ExchangeAdapter;
 
 #[test]
@@ -76,4 +77,48 @@ fn kraken_url_for_region() {
         DataKind::LOB | DataKind::TRADE,
     );
     assert!(adapter.url().contains("wss://"));
+}
+
+#[test]
+fn kraken_trade_seq_id_from_trade_id() {
+    let mut adapter = cryptomeria_ingest::kraken::KrakenAdapter::new(
+        "XBT/USD".into(),
+        "global".into(),
+        0.0,
+        None,
+        400,
+        DataKind::LOB | DataKind::TRADE,
+    );
+    // Realistic Kraken WS v2 `trade` channel push: there is NO top-level
+    // `sequence` field on trade messages (it only exists on the book channel).
+    // `trade_id` is an exchange-provided monotonically increasing sequence
+    // number per instrument, so it is the correct source for `seq_id`.
+    let json = r#"{
+        "channel": "trade",
+        "type": "snapshot",
+        "data": [{
+            "symbol": "XBT/USD",
+            "side": "buy",
+            "price": 51234.5,
+            "qty": 0.255,
+            "trade_id": 12345,
+            "ord_type": "market",
+            "timestamp": "2024-01-15T10:30:00.000000Z"
+        }]
+    }"#;
+    let msg = adapter.parse_message(json).unwrap();
+    // Confirm the top-level `sequence` the old code relied on is genuinely absent.
+    assert_eq!(msg.sequence, None);
+    let item = adapter.handle_message(&msg).expect("expected a trade item");
+    match item {
+        MarketDataItem::Trade(t) => {
+            assert_eq!(t.exchange, "kraken");
+            assert_eq!(t.trade_id.as_deref(), Some("12345"));
+            assert_eq!(t.seq_id, Some(12345));
+            assert_eq!(t.price, 51234.5);
+            assert_eq!(t.size, 0.255);
+            assert_eq!(t.side, "buy");
+        }
+        _ => panic!("expected Trade item"),
+    }
 }

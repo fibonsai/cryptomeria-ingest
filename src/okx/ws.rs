@@ -142,7 +142,7 @@ impl ExchangeAdapter for OkxAdapter {
                         size,
                         side: trade_raw.side,
                         trade_id,
-                        seq_id: trade_raw.seq,
+                        seq_id: trade_raw.seq_id,
                     }))
                 } else {
                     logger.log(Level::Warning, "[okx] failed to parse trade data");
@@ -299,7 +299,7 @@ mod tests {
     fn test_handle_message_trade() {
         let mut a = adapter();
         let msg: OkxWsMessage = serde_json::from_str(
-            r#"{"arg":{"channel":"trades","instId":"BTC-USDT"},"data":[{"px":"100.5","sz":"2.5","side":"buy","tradeId":"t1","ts":"1700000000000","seq":99}]}"#,
+            r#"{"arg":{"channel":"trades","instId":"BTC-USDT"},"data":[{"px":"100.5","sz":"2.5","side":"buy","tradeId":"t1","ts":"1700000000000","seqId":99}]}"#,
         )
         .unwrap();
         let item = a.handle_message(&msg).expect("expected a trade item");

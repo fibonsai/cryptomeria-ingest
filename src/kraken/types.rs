@@ -422,7 +422,6 @@ mod tests {
         let json = r#"{
             "channel": "trade",
             "type": "snapshot",
-            "sequence": 100,
             "data": [{
                 "symbol": "XBT/USD",
                 "side": "buy",
@@ -434,10 +433,11 @@ mod tests {
         }"#;
         let msg = KrakenWsMessage::from_json(json).unwrap();
         assert_eq!(msg.display_type(), "TRADE");
-        assert_eq!(msg.sequence, Some(100));
+        assert_eq!(msg.sequence, None);
         let t: TradeData = serde_json::from_value(msg.data[0].clone()).unwrap();
         assert!((t.price - 50000.0).abs() < f64::EPSILON);
         assert_eq!(t.side, "buy");
+        assert_eq!(t.trade_id, "12345");
     }
 
     #[test]
