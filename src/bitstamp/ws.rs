@@ -128,21 +128,21 @@ impl ExchangeAdapter for BitstampAdapter {
         &self.instrument
     }
 
-    fn subscribe_msgs(&self) -> Vec<String> {
+    fn subscribe_msgs(&self) -> Vec<(String, String)> {
         let mut msgs = Vec::new();
         if self.data_kind.contains(DataKind::LOB) {
             let orders_channel = format!(
                 "diff_order_book_{}",
                 crate::bitstamp::types::instrument_to_channel(&self.instrument)
             );
-            msgs.push(build_subscribe_msg(&orders_channel));
+            msgs.push((orders_channel.clone(), build_subscribe_msg(&orders_channel)));
         }
         if self.data_kind.contains(DataKind::TRADE) {
             let trades_channel = format!(
                 "live_trades_{}",
                 crate::bitstamp::types::instrument_to_channel(&self.instrument)
             );
-            msgs.push(build_subscribe_msg(&trades_channel));
+            msgs.push((trades_channel.clone(), build_subscribe_msg(&trades_channel)));
         }
         msgs
     }
@@ -222,9 +222,14 @@ impl ExchangeAdapter for BitstampAdapter {
         crate::urls::websocket_url(&self.region, &self.exchange).to_string()
     }
 
-    /// Called on reconnect: fetch a fresh snapshot via REST.
+    // Called on reconnect: fetch a fresh snapshot via REST, but only for the
+    // LOB channel (a Trade-only connection has no snapshot to recover).
     async fn on_reconnect(&mut self) -> Result<Vec<MarketDataItem>, String> {
-        self.fetch_snapshot().await
+        if self.data_kind.contains(DataKind::LOB) {
+            self.fetch_snapshot().await
+        } else {
+            Ok(vec![])
+        }
     }
 }
 
@@ -271,8 +276,13 @@ mod tests {
         let a = adapter();
         let msgs = a.subscribe_msgs();
         assert_eq!(msgs.len(), 2);
-        assert!(msgs[0].contains("diff_order_book_btcusd"));
-        assert!(msgs[1].contains("live_trades_btcusd"));
+        let names: Vec<String> = msgs.iter().map(|(c, _)| c.clone()).collect();
+        assert!(names.contains(&"diff_order_book_btcusd".to_string()));
+        assert!(names.contains(&"live_trades_btcusd".to_string()));
+        for (_, m) in &msgs {
+            let v: serde_json::Value = serde_json::from_str(m).unwrap();
+            assert_eq!(v["event"], "bts:subscribe");
+        }
     }
 
     #[test]
@@ -280,7 +290,8 @@ mod tests {
         let a = adapter_with_kind(DataKind::LOB);
         let msgs = a.subscribe_msgs();
         assert_eq!(msgs.len(), 1);
-        assert!(msgs[0].contains("diff_order_book_btcusd"));
+        assert_eq!(msgs[0].0, "diff_order_book_btcusd");
+        assert!(msgs[0].1.contains("diff_order_book_btcusd"));
     }
 
     #[test]
@@ -288,7 +299,8 @@ mod tests {
         let a = adapter_with_kind(DataKind::TRADE);
         let msgs = a.subscribe_msgs();
         assert_eq!(msgs.len(), 1);
-        assert!(msgs[0].contains("live_trades_btcusd"));
+        assert_eq!(msgs[0].0, "live_trades_btcusd");
+        assert!(msgs[0].1.contains("live_trades_btcusd"));
     }
 
     #[test]

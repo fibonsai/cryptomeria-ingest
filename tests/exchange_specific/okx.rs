@@ -29,10 +29,10 @@ fn okx_adapter_subscribe_msgs_covers_lob_and_trades() {
     );
     let msgs = adapter.subscribe_msgs();
     assert_eq!(msgs.len(), 2);
-    let joined = msgs.join(" ");
-    assert!(joined.contains("books"));
-    assert!(joined.contains("trades"));
-    for m in &msgs {
+    let names: Vec<String> = msgs.iter().map(|(c, _)| c.clone()).collect();
+    assert!(names.contains(&"books".to_string()));
+    assert!(names.contains(&"trades".to_string()));
+    for (_, m) in &msgs {
         let v: serde_json::Value = serde_json::from_str(m).unwrap();
         assert_eq!(v["op"], "subscribe");
     }

@@ -85,13 +85,15 @@ impl ExchangeAdapter for OkxAdapter {
         &self.instrument
     }
 
-    fn subscribe_msgs(&self) -> Vec<String> {
+    fn subscribe_msgs(&self) -> Vec<(String, String)> {
         let mut msgs = Vec::new();
         if self.data_kind.contains(DataKind::LOB) {
-            msgs.push(build_subscribe_msg("books", &self.instrument));
+            let msg = build_subscribe_msg("books", &self.instrument);
+            msgs.push(("books".to_string(), msg));
         }
         if self.data_kind.contains(DataKind::TRADE) {
-            msgs.push(build_subscribe_msg("trades", &self.instrument));
+            let msg = build_subscribe_msg("trades", &self.instrument);
+            msgs.push(("trades".to_string(), msg));
         }
         msgs
     }
@@ -219,8 +221,13 @@ mod tests {
         let a = adapter();
         let msgs = a.subscribe_msgs();
         assert_eq!(msgs.len(), 2);
-        assert!(msgs[0].contains("\"books\""));
-        assert!(msgs[1].contains("\"trades\""));
+        let names: Vec<String> = msgs.iter().map(|(c, _)| c.clone()).collect();
+        assert!(names.contains(&"books".to_string()));
+        assert!(names.contains(&"trades".to_string()));
+        for (_, m) in &msgs {
+            let v: serde_json::Value = serde_json::from_str(m).unwrap();
+            assert_eq!(v["op"], "subscribe");
+        }
     }
 
     #[test]
@@ -228,7 +235,8 @@ mod tests {
         let a = adapter_with_kind(DataKind::LOB);
         let msgs = a.subscribe_msgs();
         assert_eq!(msgs.len(), 1);
-        assert!(msgs[0].contains("\"books\""));
+        assert_eq!(msgs[0].0, "books");
+        assert!(msgs[0].1.contains("\"books\""));
     }
 
     #[test]
@@ -236,7 +244,8 @@ mod tests {
         let a = adapter_with_kind(DataKind::TRADE);
         let msgs = a.subscribe_msgs();
         assert_eq!(msgs.len(), 1);
-        assert!(msgs[0].contains("\"trades\""));
+        assert_eq!(msgs[0].0, "trades");
+        assert!(msgs[0].1.contains("\"trades\""));
     }
 
     #[test]
