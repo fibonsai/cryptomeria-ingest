@@ -1,5 +1,6 @@
 use crate::bitstamp::lob::OrderBook;
 use crate::bitstamp::types::{BitstampWsMessage, MessageType, OrderBookData, TradeData};
+use crate::config::DataKind;
 use crate::items::{LobItem, MarketDataItem, TradeItem};
 use crate::logger::logger as log;
 use crate::urls::rest_url;
@@ -34,11 +35,13 @@ pub struct BitstampAdapter {
     pub max_level_pct: f64,
     pub max_level: Option<usize>,
     pub snapshot_depth: usize,
+    pub data_kind: DataKind,
     book: OrderBook,
     prev_lob: Option<LobItem>, // Track previous LOB for duplicate detection
 }
 
 impl BitstampAdapter {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         instrument: String,
         exchange: String,
@@ -47,6 +50,7 @@ impl BitstampAdapter {
         max_level_pct: f64,
         max_level: Option<usize>,
         snapshot_depth: usize,
+        data_kind: DataKind,
     ) -> Self {
         Self {
             instrument,
@@ -56,6 +60,7 @@ impl BitstampAdapter {
             max_level_pct,
             max_level,
             snapshot_depth,
+            data_kind,
             book: OrderBook::new(),
             prev_lob: None,
         }
@@ -124,18 +129,22 @@ impl ExchangeAdapter for BitstampAdapter {
     }
 
     fn subscribe_msgs(&self) -> Vec<String> {
-        let orders_channel = format!(
-            "diff_order_book_{}",
-            crate::bitstamp::types::instrument_to_channel(&self.instrument)
-        );
-        let trades_channel = format!(
-            "live_trades_{}",
-            crate::bitstamp::types::instrument_to_channel(&self.instrument)
-        );
-        vec![
-            build_subscribe_msg(&orders_channel),
-            build_subscribe_msg(&trades_channel),
-        ]
+        let mut msgs = Vec::new();
+        if self.data_kind.contains(DataKind::LOB) {
+            let orders_channel = format!(
+                "diff_order_book_{}",
+                crate::bitstamp::types::instrument_to_channel(&self.instrument)
+            );
+            msgs.push(build_subscribe_msg(&orders_channel));
+        }
+        if self.data_kind.contains(DataKind::TRADE) {
+            let trades_channel = format!(
+                "live_trades_{}",
+                crate::bitstamp::types::instrument_to_channel(&self.instrument)
+            );
+            msgs.push(build_subscribe_msg(&trades_channel));
+        }
+        msgs
     }
 
     fn parse_message(&self, text: &str) -> Result<Self::Message, String> {
@@ -146,6 +155,9 @@ impl ExchangeAdapter for BitstampAdapter {
         let mut logger = log().lock().unwrap();
         match msg.message_type() {
             MessageType::L2Snapshot | MessageType::L2Update => {
+                if !self.data_kind.contains(DataKind::LOB) {
+                    return None;
+                }
                 let ts = msg.timestamp_ms().unwrap_or_else(|| {
                     std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -157,6 +169,9 @@ impl ExchangeAdapter for BitstampAdapter {
                 self.emit_lob(ts)
             }
             MessageType::Trade => {
+                if !self.data_kind.contains(DataKind::TRADE) {
+                    return None;
+                }
                 if let Some(trade_raw) = msg
                     .data
                     .as_ref()
@@ -226,6 +241,20 @@ mod tests {
             0.0,
             None,
             400,
+            DataKind::LOB | DataKind::TRADE,
+        )
+    }
+
+    fn adapter_with_kind(data_kind: DataKind) -> BitstampAdapter {
+        BitstampAdapter::new(
+            "BTC/USD".into(),
+            "bitstamp".into(),
+            "global".into(),
+            "BTC/USD".into(),
+            0.0,
+            None,
+            400,
+            data_kind,
         )
     }
 
@@ -244,6 +273,42 @@ mod tests {
         assert_eq!(msgs.len(), 2);
         assert!(msgs[0].contains("diff_order_book_btcusd"));
         assert!(msgs[1].contains("live_trades_btcusd"));
+    }
+
+    #[test]
+    fn test_subscribe_msgs_lob_only() {
+        let a = adapter_with_kind(DataKind::LOB);
+        let msgs = a.subscribe_msgs();
+        assert_eq!(msgs.len(), 1);
+        assert!(msgs[0].contains("diff_order_book_btcusd"));
+    }
+
+    #[test]
+    fn test_subscribe_msgs_trade_only() {
+        let a = adapter_with_kind(DataKind::TRADE);
+        let msgs = a.subscribe_msgs();
+        assert_eq!(msgs.len(), 1);
+        assert!(msgs[0].contains("live_trades_btcusd"));
+    }
+
+    #[test]
+    fn test_handle_message_trade_filtered_when_lob_only() {
+        let mut a = adapter_with_kind(DataKind::LOB);
+        let msg: BitstampWsMessage = BitstampWsMessage::from_json(
+            r#"{"event":"live_trades","channel":"live_trades_btcusd","data":{"id":5,"price":"101.0","amount":"2.5","type":0,"timestamp":"1700000000","microtimestamp":"1700000000000000"}}"#,
+        )
+        .unwrap();
+        assert!(a.handle_message(&msg).is_none());
+    }
+
+    #[test]
+    fn test_handle_message_lob_filtered_when_trade_only() {
+        let mut a = adapter_with_kind(DataKind::TRADE);
+        let msg: BitstampWsMessage = BitstampWsMessage::from_json(
+            r#"{"channel":"diff_order_book_btcusd","data":{"timestamp":1700000000,"bids":[["100.0","1.5"]],"asks":[["100.5","2.0"]]},"event":"bts:subscription_succeeded"}"#,
+        )
+        .unwrap();
+        assert!(a.handle_message(&msg).is_none());
     }
 
     #[test]

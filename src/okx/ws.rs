@@ -1,3 +1,4 @@
+use crate::config::DataKind;
 use crate::items::{LobItem, MarketDataItem, TradeItem};
 use crate::logger::logger as log;
 use crate::okx::lob::OrderBook;
@@ -30,6 +31,7 @@ pub struct OkxAdapter {
     pub max_level_pct: f64,
     pub max_level: Option<usize>,
     pub snapshot_depth: usize,
+    pub data_kind: DataKind,
     book: OrderBook,
     prev_lob: Option<LobItem>, // Track previous LOB for duplicate detection
 }
@@ -41,6 +43,7 @@ impl OkxAdapter {
         max_level_pct: f64,
         max_level: Option<usize>,
         snapshot_depth: usize,
+        data_kind: DataKind,
     ) -> Self {
         Self {
             instrument,
@@ -49,6 +52,7 @@ impl OkxAdapter {
             max_level_pct,
             max_level,
             snapshot_depth,
+            data_kind,
             book: OrderBook::new(),
             prev_lob: None,
         }
@@ -82,10 +86,14 @@ impl ExchangeAdapter for OkxAdapter {
     }
 
     fn subscribe_msgs(&self) -> Vec<String> {
-        vec![
-            build_subscribe_msg("books", &self.instrument),
-            build_subscribe_msg("trades", &self.instrument),
-        ]
+        let mut msgs = Vec::new();
+        if self.data_kind.contains(DataKind::LOB) {
+            msgs.push(build_subscribe_msg("books", &self.instrument));
+        }
+        if self.data_kind.contains(DataKind::TRADE) {
+            msgs.push(build_subscribe_msg("trades", &self.instrument));
+        }
+        msgs
     }
 
     fn parse_message(&self, text: &str) -> Result<Self::Message, String> {
@@ -96,6 +104,9 @@ impl ExchangeAdapter for OkxAdapter {
         let mut logger = log().lock().unwrap();
         match msg.message_type() {
             MessageType::L2Snapshot | MessageType::L2Update => {
+                if !self.data_kind.contains(DataKind::LOB) {
+                    return None;
+                }
                 let ts = msg.timestamp_ms().unwrap_or_else(|| {
                     std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -106,6 +117,9 @@ impl ExchangeAdapter for OkxAdapter {
                 self.emit_lob(ts)
             }
             MessageType::Trade => {
+                if !self.data_kind.contains(DataKind::TRADE) {
+                    return None;
+                }
                 if let Some(trade_raw) = msg
                     .data
                     .first()
@@ -146,6 +160,9 @@ impl ExchangeAdapter for OkxAdapter {
             }
             MessageType::L2 => {
                 // classified as L2 but no specific action — treat as update
+                if !self.data_kind.contains(DataKind::LOB) {
+                    return None;
+                }
                 let ts = msg.timestamp_ms().unwrap_or(0);
                 self.book.process_msg(msg);
                 self.emit_lob(ts)
@@ -167,7 +184,25 @@ mod tests {
     use super::*;
 
     fn adapter() -> OkxAdapter {
-        OkxAdapter::new("BTC-USDT".into(), "global".into(), 0.0, None, 400)
+        OkxAdapter::new(
+            "BTC-USDT".into(),
+            "global".into(),
+            0.0,
+            None,
+            400,
+            DataKind::LOB | DataKind::TRADE,
+        )
+    }
+
+    fn adapter_with_kind(data_kind: DataKind) -> OkxAdapter {
+        OkxAdapter::new(
+            "BTC-USDT".into(),
+            "global".into(),
+            0.0,
+            None,
+            400,
+            data_kind,
+        )
     }
 
     #[test]
@@ -186,6 +221,42 @@ mod tests {
         assert_eq!(msgs.len(), 2);
         assert!(msgs[0].contains("\"books\""));
         assert!(msgs[1].contains("\"trades\""));
+    }
+
+    #[test]
+    fn test_subscribe_msgs_lob_only() {
+        let a = adapter_with_kind(DataKind::LOB);
+        let msgs = a.subscribe_msgs();
+        assert_eq!(msgs.len(), 1);
+        assert!(msgs[0].contains("\"books\""));
+    }
+
+    #[test]
+    fn test_subscribe_msgs_trade_only() {
+        let a = adapter_with_kind(DataKind::TRADE);
+        let msgs = a.subscribe_msgs();
+        assert_eq!(msgs.len(), 1);
+        assert!(msgs[0].contains("\"trades\""));
+    }
+
+    #[test]
+    fn test_handle_message_trade_filtered_when_lob_only() {
+        let mut a = adapter_with_kind(DataKind::LOB);
+        let msg: OkxWsMessage = serde_json::from_str(
+            r#"{"arg":{"channel":"trades","instId":"BTC-USDT"},"data":[{"px":"100.5","sz":"2.5","side":"buy","tradeId":"t1","ts":"1700000000000"}]}"#,
+        )
+        .unwrap();
+        assert!(a.handle_message(&msg).is_none());
+    }
+
+    #[test]
+    fn test_handle_message_lob_filtered_when_trade_only() {
+        let mut a = adapter_with_kind(DataKind::TRADE);
+        let msg: OkxWsMessage = serde_json::from_str(
+            r#"{"arg":{"channel":"books","instId":"BTC-USDT"},"data":[{"ts":"1700000000000","bids":[["100.0","1.5"]],"asks":[["100.5","2.0"]]}]}"#,
+        )
+        .unwrap();
+        assert!(a.handle_message(&msg).is_none());
     }
 
     #[test]

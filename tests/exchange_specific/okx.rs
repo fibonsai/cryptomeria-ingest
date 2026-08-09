@@ -3,6 +3,7 @@
 //! These construct exchange adapters from public APIs and verify that the
 //! generated subscribe messages match each exchange's protocol contract.
 
+use cryptomeria_ingest::DataKind;
 use cryptomeria_ingest::wsloop::ExchangeAdapter;
 
 #[test]
@@ -24,6 +25,7 @@ fn okx_adapter_subscribe_msgs_covers_lob_and_trades() {
         0.0,
         None,
         400,
+        DataKind::LOB | DataKind::TRADE,
     );
     let msgs = adapter.subscribe_msgs();
     assert_eq!(msgs.len(), 2);
@@ -44,6 +46,7 @@ fn okx_url_for_region() {
         0.0,
         None,
         400,
+        DataKind::LOB | DataKind::TRADE,
     );
     assert!(adapter.url().contains("wss://"));
 }
