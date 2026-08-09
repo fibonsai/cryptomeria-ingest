@@ -97,13 +97,15 @@ impl ExchangeAdapter for KrakenAdapter {
         &self.instrument
     }
 
-    fn subscribe_msgs(&self) -> Vec<String> {
+    fn subscribe_msgs(&self) -> Vec<(String, String)> {
         let mut msgs = Vec::new();
         if self.data_kind.contains(DataKind::LOB) {
-            msgs.push(build_subscribe_msg("book", &self.instrument));
+            let msg = build_subscribe_msg("book", &self.instrument);
+            msgs.push(("book".to_string(), msg));
         }
         if self.data_kind.contains(DataKind::TRADE) {
-            msgs.push(build_subscribe_msg("trade", &self.instrument));
+            let msg = build_subscribe_msg("trade", &self.instrument);
+            msgs.push(("trade".to_string(), msg));
         }
         msgs
     }
@@ -237,8 +239,13 @@ mod tests {
         let a = adapter();
         let msgs = a.subscribe_msgs();
         assert_eq!(msgs.len(), 2);
-        assert!(msgs[0].contains("\"book\""));
-        assert!(msgs[1].contains("\"trade\""));
+        let names: Vec<String> = msgs.iter().map(|(c, _)| c.clone()).collect();
+        assert!(names.contains(&"book".to_string()));
+        assert!(names.contains(&"trade".to_string()));
+        for (_, m) in &msgs {
+            let v: serde_json::Value = serde_json::from_str(m).unwrap();
+            assert_eq!(v["method"], "subscribe");
+        }
     }
 
     #[test]
@@ -246,7 +253,8 @@ mod tests {
         let a = adapter_with_kind(DataKind::LOB);
         let msgs = a.subscribe_msgs();
         assert_eq!(msgs.len(), 1);
-        assert!(msgs[0].contains("\"book\""));
+        assert_eq!(msgs[0].0, "book");
+        assert!(msgs[0].1.contains("\"book\""));
     }
 
     #[test]
@@ -254,7 +262,8 @@ mod tests {
         let a = adapter_with_kind(DataKind::TRADE);
         let msgs = a.subscribe_msgs();
         assert_eq!(msgs.len(), 1);
-        assert!(msgs[0].contains("\"trade\""));
+        assert_eq!(msgs[0].0, "trade");
+        assert!(msgs[0].1.contains("\"trade\""));
     }
 
     #[test]

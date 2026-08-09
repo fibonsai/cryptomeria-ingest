@@ -414,12 +414,11 @@ Each exchange adapter (`okx::ws::OkxAdapter`, `kraken::ws::KrakenAdapter`, `bits
 
 - `instrument()`: the instrument symbol
 - `url()`: WebSocket URL for the region/exchange
-- `subscribe_msgs()`: messages to send on connection
-- `resubscribe_msgs()`: messages to send on reconnection (usually same as subscribe)
+- `subscribe_msgs()`: messages to send on connection, as `(channel_name, json)` pairs
 - `parse_message(&self, text: &str) -> Result<Self::Message, String>`: parse raw WebSocket text
 - `handle_message(&mut self, msg: &Self::Message) -> Option<MarketDataItem>`: process a parsed message, update internal state, return an item to emit
 - `handle_heartbeat(&self, msg: &Self::Message) -> bool`: whether to respond to this message as a heartbeat
-- `async on_reconnect(&self) -> Result<Vec<MarketDataItem>, String>`: optional async hook to fetch snapshot on reconnect (used by Bitstamp)
+- `async on_reconnect(&self) -> Result<Vec<MarketDataItem>, String>`: optional async hook to fetch snapshot on reconnect (used by Bitstamp for the LOB channel)
 
 ### WebSocket Loop (`wsloop::run_exchange_stream`)
 
@@ -436,14 +435,26 @@ The shared logic that handles:
 
 ### Stream Lifecycle
 
-1. `stream(config)` validates the config and launches the exchange adapter task.
-2. The task connects, subscribes, and begins reading messages.
-3. Each parsed message is passed to `adapter.handle_message`, which may return a `MarketDataItem`.
-4. Items are sent via an `mpsc::Sender` to the receiver half of the stream.
-5. The stream yields `Result<MarketDataItem, IngestError>`.
-6. If the receiver is dropped (e.g., the stream goes out of scope), the sender sends `Err`, the task detects this, and exits cleanly.
-7. On fatal errors (max reconnect attempts exceeded), the stream yields an `Err` and ends.
-8. The first `LobItem` in the stream (if `data_kind` includes `LOB`) is always a full snapshot.
+1. `stream(config)` validates the config and decomposes `data_kind` into per-channel
+   single-bit kinds (LOB and/or Trade) via `config::active_channel_kinds`.
+2. For each active channel, the exchange's `build_channel_streams` factory constructs a
+   single-channel adapter and launches a dedicated `wsloop::run_exchange_stream` task — one
+   WebSocket connection per channel, each with its own independent reconnect/backoff loop.
+3. Each task connects, subscribes (logging the channel name at `Info` on success and
+   `Error` on failure), and begins reading messages.
+4. Each parsed message is passed to `adapter.handle_message`, which returns a `MarketDataItem`.
+5. Items are sent via a bounded `mpsc::Sender` (capacity 1024) to the receiver half.
+6. The per-channel streams are merged into one via `wsloop::merge_stream_handles`
+   (`futures_util::stream::select_all`), which is returned from `stream()`.
+7. The merged stream yields `Result<MarketDataItem, IngestError>`.
+8. If the receiver is dropped (e.g., the stream goes out of scope), `StreamHandle::Drop`
+   aborts **all** background tasks, so no task leaks.
+9. On fatal errors (max reconnect attempts exceeded), a channel's stream ends; the other
+   channels continue independently.
+10. The first `LobItem` on the LOB channel (if `data_kind` includes `LOB`) is always a
+    full snapshot.
+
+The public `stream()` return type is unchanged — callers still see a single merged stream.
 
 ### Testing
 

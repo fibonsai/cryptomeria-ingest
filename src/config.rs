@@ -36,6 +36,21 @@ impl DataKind {
     }
 }
 
+/// Decompose a combined `DataKind` into single-bit kinds, one per subscribed
+/// data channel. Used to spawn one WebSocket connection per channel.
+///
+/// Returns the kinds in a stable order: `Lob` first, then `Trade`.
+pub fn active_channel_kinds(data_kind: DataKind) -> Vec<DataKind> {
+    let mut kinds = Vec::new();
+    if data_kind.contains(DataKind::LOB) {
+        kinds.push(DataKind::LOB);
+    }
+    if data_kind.contains(DataKind::TRADE) {
+        kinds.push(DataKind::TRADE);
+    }
+    kinds
+}
+
 impl fmt::Display for DataKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut parts = Vec::new();
@@ -331,6 +346,29 @@ mod tests {
         let k = DataKind::LOB | DataKind::TRADE;
         assert!(k.contains(DataKind::LOB));
         assert!(k.contains(DataKind::TRADE));
+    }
+
+    #[test]
+    fn test_active_channel_kinds_lob_only() {
+        assert_eq!(active_channel_kinds(DataKind::LOB), vec![DataKind::LOB]);
+    }
+
+    #[test]
+    fn test_active_channel_kinds_trade_only() {
+        assert_eq!(active_channel_kinds(DataKind::TRADE), vec![DataKind::TRADE]);
+    }
+
+    #[test]
+    fn test_active_channel_kinds_both() {
+        assert_eq!(
+            active_channel_kinds(DataKind::LOB | DataKind::TRADE),
+            vec![DataKind::LOB, DataKind::TRADE]
+        );
+    }
+
+    #[test]
+    fn test_active_channel_kinds_empty() {
+        assert!(active_channel_kinds(DataKind::empty()).is_empty());
     }
 
     #[test]

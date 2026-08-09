@@ -1,7 +1,7 @@
 use crate::config::DataSourceConfig;
 use crate::instrument::validate_with_fallback;
 use crate::items::{IngestError, MarketDataItem};
-use crate::wsloop::run_exchange_stream;
+use crate::wsloop::{StreamHandle, merge_stream_handles};
 use futures_util::Stream;
 use std::pin::Pin;
 
@@ -11,6 +11,10 @@ use std::pin::Pin;
 /// validates the instrument against the exchange (with fallback mapping),
 /// selects the appropriate exchange adapter, and returns a stream of
 /// `Result<MarketDataItem, IngestError>`.
+///
+/// One dedicated WebSocket connection is opened per subscribed data channel
+/// (LOB and/or Trade), each with its own reconnect/backoff loop. The per-channel
+/// streams are merged into a single stream returned to the caller.
 pub async fn stream(
     config: DataSourceConfig,
 ) -> Result<Pin<Box<dyn Stream<Item = Result<MarketDataItem, IngestError>> + Send>>, IngestError> {
@@ -19,42 +23,10 @@ pub async fn stream(
     // Validate instrument with fallback mapping
     let validated_instrument = validate_with_fallback(&config).await?;
 
-    let stream_handle = match config.exchange.as_str() {
-        "okx" => {
-            let adapter = crate::okx::ws::OkxAdapter::new(
-                validated_instrument.clone(),
-                config.region.clone(),
-                config.max_level_pct,
-                config.max_level,
-                config.snapshot_depth,
-                config.data_kind,
-            );
-            run_exchange_stream(config, adapter).await?
-        }
-        "kraken" => {
-            let adapter = crate::kraken::ws::KrakenAdapter::new(
-                validated_instrument.clone(),
-                config.region.clone(),
-                config.max_level_pct,
-                config.max_level,
-                config.snapshot_depth,
-                config.data_kind,
-            );
-            run_exchange_stream(config, adapter).await?
-        }
-        "bitstamp" => {
-            let adapter = crate::bitstamp::ws::BitstampAdapter::new(
-                validated_instrument.clone(),
-                config.exchange.clone(),
-                config.region.clone(),
-                validated_instrument.clone(),
-                config.max_level_pct,
-                config.max_level,
-                config.snapshot_depth,
-                config.data_kind,
-            );
-            run_exchange_stream(config, adapter).await?
-        }
+    let handles: Vec<StreamHandle> = match config.exchange.as_str() {
+        "okx" => crate::okx::build_channel_streams(config, validated_instrument).await?,
+        "kraken" => crate::kraken::build_channel_streams(config, validated_instrument).await?,
+        "bitstamp" => crate::bitstamp::build_channel_streams(config, validated_instrument).await?,
         _ => {
             return Err(IngestError::Config(format!(
                 "unknown exchange: {}",
@@ -63,7 +35,8 @@ pub async fn stream(
         }
     };
 
-    Ok(Box::pin(stream_handle))
+    let merged = merge_stream_handles(handles);
+    Ok(Box::pin(merged))
 }
 
 #[cfg(test)]

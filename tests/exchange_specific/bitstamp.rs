@@ -25,10 +25,10 @@ fn bitstamp_adapter_subscribe_msgs_covers_orders_and_trades() {
     );
     let msgs = adapter.subscribe_msgs();
     assert_eq!(msgs.len(), 2);
-    let joined = msgs.join(" ");
-    assert!(joined.contains("diff_order_book_btcusd"));
-    assert!(joined.contains("live_trades_btcusd"));
-    for m in &msgs {
+    let names: Vec<String> = msgs.iter().map(|(c, _)| c.clone()).collect();
+    assert!(names.contains(&"diff_order_book_btcusd".to_string()));
+    assert!(names.contains(&"live_trades_btcusd".to_string()));
+    for (_, m) in &msgs {
         let v: serde_json::Value = serde_json::from_str(m).unwrap();
         assert_eq!(v["event"], "bts:subscribe");
     }
