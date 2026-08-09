@@ -13,7 +13,7 @@ were incorrect for real exchange feeds and left `seq_id` as `None` on live data.
 
 ## Implemented
 
-Linking pull request after creation.
+[PR #46](https://github.com/fibonsai/cryptomeria-ingest/pull/46)
 
 ## Created
 
