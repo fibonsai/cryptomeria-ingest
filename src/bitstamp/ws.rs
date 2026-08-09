@@ -38,6 +38,7 @@ pub struct BitstampAdapter {
     pub data_kind: DataKind,
     book: OrderBook,
     prev_lob: Option<LobItem>, // Track previous LOB for duplicate detection
+    trade_seq: u64, // Synthetic monotonic counter for seq_id (persists across reconnects)
 }
 
 impl BitstampAdapter {
@@ -63,6 +64,7 @@ impl BitstampAdapter {
             data_kind,
             book: OrderBook::new(),
             prev_lob: None,
+            trade_seq: 0,
         }
     }
 
@@ -185,6 +187,7 @@ impl ExchangeAdapter for BitstampAdapter {
                     } else {
                         Some(trade_raw.id.to_string())
                     };
+                    self.trade_seq += 1;
                     Some(MarketDataItem::Trade(TradeItem {
                         ts,
                         exchange: self.exchange.clone(),
@@ -192,7 +195,7 @@ impl ExchangeAdapter for BitstampAdapter {
                         size,
                         side: trade_raw.side(),
                         trade_id,
-                        seq_id: None,
+                        seq_id: Some(self.trade_seq),
                     }))
                 } else {
                     logger.log(Level::Warning, "[bitstamp] failed to parse trade data");
@@ -348,9 +351,31 @@ mod tests {
                 assert_eq!(t.side, "buy");
                 assert_eq!(t.exchange, "bitstamp");
                 assert_eq!(t.trade_id.as_deref(), Some("5"));
+                assert_eq!(t.seq_id, Some(1));
             }
             _ => panic!("expected Trade item"),
         }
+    }
+
+    #[test]
+    fn test_handle_message_trade_seq_id_increments() {
+        let mut a = adapter();
+        let mk = |id: u64| {
+            BitstampWsMessage::from_json(&format!(
+                r#"{{"event":"trade","channel":"live_trades_btcusd","data":{{"id":{id},"price":"100.0","amount":"1.0","type":0,"timestamp":"0","microtimestamp":"0","buy_order_id":0,"sell_order_id":0}}}}"#,
+            ))
+            .unwrap()
+        };
+        let t1 = match a.handle_message(&mk(10)).unwrap() {
+            MarketDataItem::Trade(t) => t,
+            _ => panic!("expected Trade item"),
+        };
+        let t2 = match a.handle_message(&mk(11)).unwrap() {
+            MarketDataItem::Trade(t) => t,
+            _ => panic!("expected Trade item"),
+        };
+        assert_eq!(t1.seq_id, Some(1));
+        assert_eq!(t2.seq_id, Some(2));
     }
 
     #[test]
