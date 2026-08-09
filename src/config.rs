@@ -116,6 +116,11 @@ pub struct ResilienceConfig {
     pub heartbeat_interval_secs: Option<u64>,
     /// Maximum reconnect attempts (None = unlimited).
     pub max_attempts: Option<u32>,
+    /// Silence timeout in seconds. If a channel receives no messages for this
+    /// duration, the connection is treated as failed and reconnected.
+    /// `None` disables silence detection.
+    #[serde(default)]
+    pub silence_timeout_secs: Option<u64>,
 }
 
 impl Default for ResilienceConfig {
@@ -127,6 +132,7 @@ impl Default for ResilienceConfig {
             jitter_ms: 1000,
             heartbeat_interval_secs: None,
             max_attempts: None,
+            silence_timeout_secs: None,
         }
     }
 }
@@ -380,6 +386,35 @@ mod tests {
         assert_eq!(cfg.jitter_ms, 1000);
         assert_eq!(cfg.heartbeat_interval_secs, None);
         assert_eq!(cfg.max_attempts, None);
+        assert_eq!(cfg.silence_timeout_secs, None);
+    }
+
+    #[test]
+    fn test_resilience_config_deserialize_silence_timeout() {
+        let json = r#"{
+            "initial_backoff_ms": 500,
+            "max_backoff_ms": 30000,
+            "backoff_multiplier": 1.5,
+            "jitter_ms": 500,
+            "heartbeat_interval_secs": 30,
+            "max_attempts": 5,
+            "silence_timeout_secs": 30
+        }"#;
+        let cfg: ResilienceConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.silence_timeout_secs, Some(30));
+    }
+
+    #[test]
+    fn test_resilience_config_deserialize_silence_timeout_optional() {
+        // silence_timeout_secs is optional (serde default); omit it and it should be None.
+        let json = r#"{
+            "initial_backoff_ms": 1000,
+            "max_backoff_ms": 60000,
+            "backoff_multiplier": 2.0,
+            "jitter_ms": 1000
+        }"#;
+        let cfg: ResilienceConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.silence_timeout_secs, None);
     }
 
     #[test]

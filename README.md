@@ -109,6 +109,7 @@ Fine-tune reconnection behavior.
 | `jitter_ms` | `u64` | `1000` | Random jitter in ms |
 | `heartbeat_interval_secs` | `Option<u64>` | `None` | Application-level heartbeat (Kraken) |
 | `max_attempts` | `Option<u32>` | `None` | Maximum reconnect attempts (`None` = infinite) |
+| `silence_timeout_secs` | `Option<u64>` | `None` | Silence timeout in seconds; reconnects if no WS messages arrive within this window (`None` = disabled) |
 
 ### `MarketDataItem`
 
@@ -287,6 +288,28 @@ let config = DataSourceConfig {
     ..Default::default()
 };
 ```
+
+### 9. Detect silent WebSocket channels
+
+```rust
+let config = DataSourceConfig {
+    exchange: "okx".into(),
+    region: "global".into(),
+    instrument: "BTC-USDT".into(),
+    data_kind: DataKind::LOB,
+    resilience: ResilienceConfig {
+        silence_timeout_secs: Some(10), // reconnect if no WS message for 10s
+        ..Default::default()
+    },
+    ..Default::default()
+};
+```
+
+When `silence_timeout_secs` is `Some(n)`, the WebSocket loop monitors channel activity.
+If no message (data, heartbeat, ping, or pong) arrives for more than `n` seconds, the
+connection is treated as failed, a warning is logged, and the existing exponential-backoff
+reconnect strategy is applied. When `None` (default), silence detection is disabled and
+behavior is unchanged.
 
 ## Instrument Validation and Fallback
 

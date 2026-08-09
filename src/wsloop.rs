@@ -18,6 +18,20 @@ const BACKOFF_MULTIPLIER: f64 = 2.0;
 /// Random jitter in milliseconds added to each backoff.
 const JITTER_MS: u64 = 1000;
 
+/// Sentinel duration (in seconds) used for the silence timer when
+/// `silence_timeout_secs` is `None`. Long enough that the timer effectively
+/// never fires, keeping the 3-branch `select!` structure uniform.
+const DISABLED_SILENCE_SECS: u64 = 86_400 * 365; // ~1 year
+
+/// Compute the `Duration` for the silence-timeout sleep.
+///
+/// When `Some(secs)`, returns `Duration::from_secs(secs)`.
+/// When `None`, returns a sentinel duration that is effectively infinite so
+/// the timer branch in `tokio::select!` never fires.
+pub fn silence_sleep_duration(secs: Option<u64>) -> Duration {
+    Duration::from_secs(secs.unwrap_or(DISABLED_SILENCE_SECS))
+}
+
 /// Compute exponential backoff with jitter.
 ///
 /// `attempt` is the number of failed attempts so far (0 for first attempt).
@@ -182,6 +196,7 @@ where
     let instrument = adapter.instrument().to_string();
     let url = adapter.url();
     let max_attempts = config.resilience.max_attempts;
+    let silence_timeout_secs = config.resilience.silence_timeout_secs;
 
     // Spawn the worker task.
     let join_handle = tokio::task::spawn(async move {
@@ -217,7 +232,13 @@ where
             let (mut write, mut read) = ws_stream.split();
 
             // Send subscription messages.
-            for (channel, msg) in adapter.subscribe_msgs() {
+            let subscribe_channels = adapter.subscribe_msgs();
+            let channel_names: String = subscribe_channels
+                .iter()
+                .map(|(c, _)| c.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            for (channel, msg) in subscribe_channels {
                 match write.send(Message::Text(msg)).await {
                     Ok(()) => {
                         log().lock().unwrap().log(
@@ -246,11 +267,24 @@ where
             }
             attempt = 0; // reset attempt counter on successful connect
 
+            // Silence timeout timer — reset on every received message so any
+            // WebSocket traffic (data, heartbeat, ping/pong) counts as activity.
+            // When `silence_timeout_secs` is `None`, the sentinel duration is
+            // effectively infinite and the timer branch never fires.
+            let silence_duration = silence_sleep_duration(silence_timeout_secs);
+            let silence_sleep = tokio::time::sleep(silence_duration);
+            tokio::pin!(silence_sleep);
+
             // Main read loop.
             'read: loop {
                 tokio::select! {
+                    biased;
                     // Read a WebSocket message.
                     msg = read.next() => {
+                        // Any received message resets the silence timer.
+                        silence_sleep.as_mut().reset(
+                            tokio::time::Instant::now() + silence_duration
+                        );
                         match msg {
                             Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) => {
                                 // Parse and handle the message.
@@ -315,6 +349,20 @@ where
                         );
                         break 'read;
                     }
+                    // Silence timeout: channel has not received any message
+                    // within the configured window. Treat as a connection
+                    // failure and fall through to the existing reconnect path.
+                    _ = &mut silence_sleep => {
+                        if let Some(secs) = silence_timeout_secs {
+                            log().lock().unwrap().log(
+                                Level::Warning,
+                                &format!(
+                                    "[WS channel silent for >{secs}s] instrument={instrument} channel={channel_names}"
+                                ),
+                            );
+                            break 'read;
+                        }
+                    }
                 }
             }
 
@@ -370,6 +418,20 @@ mod tests {
         let d2 = backoff_delay(2);
         assert!(d2 >= Duration::from_millis(4 * INITIAL_BACKOFF_MS));
         assert!(d2 <= Duration::from_millis(4 * INITIAL_BACKOFF_MS + 2 * JITTER_MS));
+    }
+
+    #[test]
+    fn test_silence_sleep_duration_some() {
+        assert_eq!(silence_sleep_duration(Some(30)), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_silence_sleep_duration_none_is_effectively_infinite() {
+        // When None (disabled), the sentinel duration must be long enough that
+        // the timer never fires during normal operation.
+        let d = silence_sleep_duration(None);
+        assert_eq!(d, Duration::from_secs(DISABLED_SILENCE_SECS));
+        assert!(d > Duration::from_secs(86400)); // at least one day
     }
 
     #[tokio::test]
