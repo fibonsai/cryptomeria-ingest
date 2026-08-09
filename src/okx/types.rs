@@ -214,8 +214,8 @@ pub struct TradeData {
     #[serde(default)]
     pub ts: String,
 
-    #[serde(default)]
-    pub seq: Option<u64>,
+    #[serde(default, rename = "seqId")]
+    pub seq_id: Option<u64>,
 }
 
 /// A single LOB price level: [price, size, count, orders]
@@ -329,7 +329,7 @@ mod tests {
                 "sz": "0.119",
                 "side": "buy",
                 "ts": "1617503161778",
-                "seq": 123456
+                "seqId": 123456
             }]
         }"#;
         let msg = OkxWsMessage::from_json(json).unwrap();
@@ -337,7 +337,7 @@ mod tests {
         let t: TradeData = serde_json::from_value(msg.data[0].clone()).unwrap();
         assert_eq!(t.px, "42135.6");
         assert_eq!(t.side, "buy");
-        assert_eq!(t.seq, Some(123456));
+        assert_eq!(t.seq_id, Some(123456));
     }
 
     #[test]

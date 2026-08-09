@@ -6,7 +6,10 @@ Core Architecture
 
 ## Status
 
-Accepted
+Superseded by [ADR-008](ADR-008-20260810-corrected-seq-id-population-for-okx-and-kraken-trades.md)
+— the OKX (`data[0].seq`) and Kraken (top-level `sequence`) field sources documented here were
+incorrect for real exchange feeds and left `seq_id` as `None` on live data. `seq_id` is now
+populated from `seqId` on OKX and from `trade_id` on Kraken (see ADR-008).
 
 ## Created
 

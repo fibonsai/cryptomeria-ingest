@@ -154,7 +154,7 @@ Trade execution.
 | `size` | `f64` | Trade size (quantity) |
 | `side` | `String` | `"buy"` or `"sell"` |
 | `trade_id` | `Option<String>` | Exchange-specific trade ID (if available) |
-| `seq_id` | `Option<u64>` | Exchange-specific sequence ID (OKX: `data[0].seq`, Kraken: top-level `sequence`, Bitstamp: synthetic counter) |
+| `seq_id` | `Option<u64>` | Exchange-specific sequence ID (OKX: `data[0].seqId`; Kraken: derived from the `trade_id` integer; Bitstamp: synthetic monotonic counter that persists across reconnects, since the exchange provides no trade sequence) |
 
 ### `stream(config) -> Stream<Item = Result<MarketDataItem, IngestError>>`
 
