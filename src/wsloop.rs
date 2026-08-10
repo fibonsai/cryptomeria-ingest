@@ -23,6 +23,17 @@ pub fn silence_sleep_duration(secs: Option<u64>) -> Duration {
     Duration::from_secs(secs.unwrap_or(DISABLED_SILENCE_SECS))
 }
 
+/// Normalize the configured `max_attempts` so that `Some(0)` is treated as
+/// "infinite retries" (the common 0 = unlimited convention), identical to `None`.
+///
+/// Returns `None` for both `None` and `Some(0)`; otherwise `Some(n as u64)`.
+pub fn normalize_max_attempts(max: Option<u32>) -> Option<u64> {
+    match max {
+        Some(0) | None => None,
+        Some(n) => Some(n as u64),
+    }
+}
+
 /// Compute exponential backoff with jitter, honoring the resilience
 /// configuration (`initial_backoff_ms`, `max_backoff_ms`,
 /// `backoff_multiplier`, `jitter_ms`).
@@ -195,7 +206,7 @@ where
     let exchange = adapter.exchange().to_string();
     let url = adapter.url();
     let resilience = config.resilience.clone();
-    let max_attempts = config.resilience.max_attempts;
+    let max_attempts = normalize_max_attempts(config.resilience.max_attempts);
     let silence_timeout_secs = config.resilience.silence_timeout_secs;
 
     // Spawn the worker task.
@@ -221,11 +232,14 @@ where
                     );
                     attempt += 1;
                     if let Some(max) = max_attempts
-                        && attempt >= max as u64
+                        && attempt >= max
                     {
                         error!(
                             "[WS max reconnects exceeded] exchange={exchange} instrument={instrument} channel={channel_names} attempt={attempt} max_attempts={max_attempts:?}"
                         );
+                        let _ = tx
+                            .send(Err(IngestError::MaxReconnectsExceeded(attempt as u32)))
+                            .await;
                         return Err(IngestError::MaxReconnectsExceeded(attempt as u32));
                     }
                     let delay = backoff_delay(attempt - 1, &resilience);
@@ -254,11 +268,14 @@ where
                         );
                         attempt += 1;
                         if let Some(max) = max_attempts
-                            && attempt >= max as u64
+                            && attempt >= max
                         {
                             error!(
                                 "[WS max reconnects exceeded] exchange={exchange} instrument={instrument} channel={channel} attempt={attempt} max_attempts={max_attempts:?}"
                             );
+                            let _ = tx
+                                .send(Err(IngestError::MaxReconnectsExceeded(attempt as u32)))
+                                .await;
                             return Err(IngestError::MaxReconnectsExceeded(attempt as u32));
                         }
                         let delay = backoff_delay(attempt - 1, &resilience);
@@ -365,11 +382,14 @@ where
             // Increment attempt counter and backoff before reconnecting.
             attempt += 1;
             if let Some(max) = max_attempts
-                && attempt >= max as u64
+                && attempt >= max
             {
                 error!(
                     "[WS max reconnects exceeded] exchange={exchange} instrument={instrument} channel={channel_names} attempt={attempt} max_attempts={max_attempts:?}"
                 );
+                let _ = tx
+                    .send(Err(IngestError::MaxReconnectsExceeded(attempt as u32)))
+                    .await;
                 return Err(IngestError::MaxReconnectsExceeded(attempt as u32));
             }
 
@@ -551,6 +571,149 @@ mod tests {
             counter.load(Ordering::SeqCst),
             0,
             "task should have been aborted before completing"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Subtask 1: Normalize Some(0) → None (infinite retries)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_normalize_max_attempts_some_zero_becomes_none() {
+        assert_eq!(normalize_max_attempts(Some(0)), None);
+    }
+
+    #[test]
+    fn test_normalize_max_attempts_none_stays_none() {
+        assert_eq!(normalize_max_attempts(None), None);
+    }
+
+    #[test]
+    fn test_normalize_max_attempts_some_n_preserved() {
+        assert_eq!(normalize_max_attempts(Some(3)), Some(3u64));
+        assert_eq!(normalize_max_attempts(Some(1)), Some(1u64));
+    }
+
+    // ------------------------------------------------------------------
+    // Subtask 2: Worker-task errors surfaced through the mpsc channel
+    // ------------------------------------------------------------------
+
+    /// Minimal mock adapter for testing the reconnect loop.
+    /// Uses a URL that is guaranteed to fail (nothing listening on port 1).
+    #[derive(Clone)]
+    struct MockAdapter {
+        url: String,
+    }
+
+    impl ExchangeAdapter for MockAdapter {
+        type Message = String;
+        fn instrument(&self) -> &str {
+            "btcusd"
+        }
+        fn exchange(&self) -> &'static str {
+            "bitstamp"
+        }
+        fn url(&self) -> String {
+            self.url.clone()
+        }
+        fn subscribe_msgs(&self) -> Vec<(String, String)> {
+            vec![("test_channel".to_string(), "{}".to_string())]
+        }
+        fn parse_message(&self, _text: &str) -> Result<Self::Message, String> {
+            Ok("".to_string())
+        }
+        fn handle_message(&mut self, _msg: &Self::Message) -> Option<MarketDataItem> {
+            None
+        }
+        fn handle_heartbeat(&self, _msg: &Self::Message) -> bool {
+            false
+        }
+    }
+
+    #[tokio::test]
+    async fn test_some_zero_max_attempts_does_not_exhaust_retries() {
+        use crate::config::DataKind;
+        use crate::config::DataSourceConfig;
+        use std::collections::HashMap;
+
+        let config = DataSourceConfig {
+            exchange: "bitstamp".to_string(),
+            region: "global".to_string(),
+            instrument: "BTCUSD".to_string(),
+            data_kind: DataKind::LOB,
+            max_level: None,
+            max_level_pct: 0.0,
+            resilience: ResilienceConfig {
+                initial_backoff_ms: 1, // tiny backoff so the test is fast
+                max_attempts: Some(0), // should mean infinite, not zero
+                silence_timeout_secs: None,
+                ..Default::default()
+            },
+            alias: None,
+            fallback: HashMap::new(),
+        };
+
+        let adapter = MockAdapter {
+            url: "ws://127.0.0.1:1".to_string(), // nothing listening → connect fails
+        };
+
+        let handle = run_exchange_stream(config, adapter).await.unwrap();
+
+        // With Some(0) meaning infinite, the stream should NOT immediately emit
+        // MaxReconnectsExceeded. Instead it should loop retrying (connect failures
+        // keep happening). We assert that no MaxReconnectsExceeded error arrives
+        // within a short window — the stream keeps retrying instead.
+        use futures_util::StreamExt;
+        let mut handle = handle;
+        let item = tokio::time::timeout(Duration::from_millis(500), handle.stream.next()).await;
+
+        assert!(
+            item.is_err(),
+            "Some(0) should mean infinite retries; stream should not emit an error within 500ms"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_max_attempts_some_1_surfaces_error_through_channel() {
+        use crate::config::DataKind;
+        use crate::config::DataSourceConfig;
+        use futures_util::StreamExt;
+        use std::collections::HashMap;
+
+        let config = DataSourceConfig {
+            exchange: "bitstamp".to_string(),
+            region: "global".to_string(),
+            instrument: "BTCUSD".to_string(),
+            data_kind: DataKind::LOB,
+            max_level: None,
+            max_level_pct: 0.0,
+            resilience: ResilienceConfig {
+                initial_backoff_ms: 1,
+                max_attempts: Some(1), // allow 1 attempt → exhausts on first failure
+                silence_timeout_secs: None,
+                ..Default::default()
+            },
+            alias: None,
+            fallback: HashMap::new(),
+        };
+
+        let adapter = MockAdapter {
+            url: "ws://127.0.0.1:1".to_string(),
+        };
+
+        let mut handle = run_exchange_stream(config, adapter).await.unwrap();
+
+        // With max_attempts = Some(1), the first connect failure should surface
+        // MaxReconnectsExceeded(1) through the stream — not just close the channel.
+        let item = tokio::time::timeout(Duration::from_secs(10), handle.stream.next())
+            .await
+            .expect("timeout waiting for error to surface through channel");
+
+        let item = item.expect("stream should emit an item");
+        assert!(
+            matches!(item, Err(IngestError::MaxReconnectsExceeded(1))),
+            "expected MaxReconnectsExceeded(1) through the channel, got: {:?}",
+            item
         );
     }
 }
