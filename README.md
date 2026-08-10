@@ -106,7 +106,7 @@ Fine-tune reconnection behavior.
 | `backoff_multiplier` | `f64` | `2.0` | Multiplier per attempt |
 | `jitter_ms` | `u64` | `1000` | Random jitter in ms |
 | `heartbeat_interval_secs` | `Option<u64>` | `None` | Application-level heartbeat (Kraken) |
-| `max_attempts` | `Option<u32>` | `None` | Maximum reconnect attempts (`None` = infinite) |
+| `max_attempts` | `Option<u32>` | `None` | Maximum reconnect attempts (`None` or `Some(0)` = infinite) |
 | `silence_timeout_secs` | `Option<u64>` | `None` | Silence timeout in seconds; reconnects if no WS messages arrive within this window (`None` = disabled) |
 
 ### `MarketDataItem`
