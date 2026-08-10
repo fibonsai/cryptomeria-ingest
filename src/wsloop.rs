@@ -1,3 +1,4 @@
+use crate::config::ResilienceConfig;
 use crate::items::{IngestError, MarketDataItem};
 use futures_util::{SinkExt, Stream, StreamExt, stream};
 use log::{debug, error, info, warn};
@@ -7,15 +8,6 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
 use tokio_tungstenite::tungstenite::Message;
-
-/// Initial backoff in milliseconds.
-const INITIAL_BACKOFF_MS: u64 = 1000;
-/// Maximum backoff in milliseconds.
-const MAX_BACKOFF_MS: u64 = 60_000;
-/// Backoff multiplier per attempt.
-const BACKOFF_MULTIPLIER: f64 = 2.0;
-/// Random jitter in milliseconds added to each backoff.
-const JITTER_MS: u64 = 1000;
 
 /// Sentinel duration (in seconds) used for the silence timer when
 /// `silence_timeout_secs` is `None`. Long enough that the timer effectively
@@ -31,14 +23,18 @@ pub fn silence_sleep_duration(secs: Option<u64>) -> Duration {
     Duration::from_secs(secs.unwrap_or(DISABLED_SILENCE_SECS))
 }
 
-/// Compute exponential backoff with jitter.
+/// Compute exponential backoff with jitter, honoring the resilience
+/// configuration (`initial_backoff_ms`, `max_backoff_ms`,
+/// `backoff_multiplier`, `jitter_ms`).
 ///
 /// `attempt` is the number of failed attempts so far (0 for first attempt).
 /// Returns the delay duration.
-pub fn backoff_delay(attempt: u64) -> Duration {
-    let base = (INITIAL_BACKOFF_MS as f64 * BACKOFF_MULTIPLIER.powi(attempt as i32))
-        .min(MAX_BACKOFF_MS as f64);
-    let jitter = (fastrand::f64() * 2.0 * JITTER_MS as f64 - JITTER_MS as f64) as u64;
+pub fn backoff_delay(attempt: u64, resilience: &ResilienceConfig) -> Duration {
+    let base = (resilience.initial_backoff_ms as f64
+        * resilience.backoff_multiplier.powi(attempt as i32))
+    .min(resilience.max_backoff_ms as f64);
+    let jitter =
+        (fastrand::f64() * 2.0 * resilience.jitter_ms as f64 - resilience.jitter_ms as f64) as u64;
     let ms = (base + jitter as f64) as u64;
     Duration::from_millis(ms)
 }
@@ -198,6 +194,7 @@ where
     let instrument = adapter.instrument().to_string();
     let exchange = adapter.exchange().to_string();
     let url = adapter.url();
+    let resilience = config.resilience.clone();
     let max_attempts = config.resilience.max_attempts;
     let silence_timeout_secs = config.resilience.silence_timeout_secs;
 
@@ -220,7 +217,7 @@ where
                     {
                         return Err(IngestError::MaxReconnectsExceeded(attempt as u32));
                     }
-                    let delay = backoff_delay(attempt - 1);
+                    let delay = backoff_delay(attempt - 1, &resilience);
                     sleep(delay).await;
                     continue;
                 }
@@ -254,7 +251,7 @@ where
                         {
                             return Err(IngestError::MaxReconnectsExceeded(attempt as u32));
                         }
-                        let delay = backoff_delay(attempt - 1);
+                        let delay = backoff_delay(attempt - 1, &resilience);
                         sleep(delay).await;
                         continue 'outer; // restart connection
                     }
@@ -374,7 +371,7 @@ where
             }
 
             // Backoff before next reconnect attempt.
-            let delay = backoff_delay(attempt - 1);
+            let delay = backoff_delay(attempt - 1, &resilience);
             sleep(delay).await;
         }
     });
@@ -395,15 +392,42 @@ mod tests {
     #[tokio::test]
     async fn test_backoff_delay() {
         // Note: due to jitter, we can't assert exact values, but we can check bounds.
-        let d0 = backoff_delay(0);
-        assert!(d0 >= Duration::from_millis(INITIAL_BACKOFF_MS));
-        assert!(d0 <= Duration::from_millis(INITIAL_BACKOFF_MS + 2 * JITTER_MS));
-        let d1 = backoff_delay(1);
-        assert!(d1 >= Duration::from_millis(INITIAL_BACKOFF_MS));
-        assert!(d1 <= Duration::from_millis(2 * INITIAL_BACKOFF_MS + 2 * JITTER_MS));
-        let d2 = backoff_delay(2);
-        assert!(d2 >= Duration::from_millis(4 * INITIAL_BACKOFF_MS));
-        assert!(d2 <= Duration::from_millis(4 * INITIAL_BACKOFF_MS + 2 * JITTER_MS));
+        let cfg = ResilienceConfig::default();
+        let d0 = backoff_delay(0, &cfg);
+        assert!(d0 >= Duration::from_millis(cfg.initial_backoff_ms));
+        assert!(d0 <= Duration::from_millis(cfg.initial_backoff_ms + 2 * cfg.jitter_ms));
+        let d1 = backoff_delay(1, &cfg);
+        assert!(d1 >= Duration::from_millis(cfg.initial_backoff_ms));
+        assert!(d1 <= Duration::from_millis(2 * cfg.initial_backoff_ms + 2 * cfg.jitter_ms));
+        let d2 = backoff_delay(2, &cfg);
+        assert!(d2 >= Duration::from_millis(4 * cfg.initial_backoff_ms));
+        assert!(d2 <= Duration::from_millis(4 * cfg.initial_backoff_ms + 2 * cfg.jitter_ms));
+    }
+
+    #[tokio::test]
+    async fn test_backoff_delay_respects_config() {
+        // Custom resilience config: initial 100ms, max 1000ms, multiplier 2.0,
+        // jitter 10ms. The computed delay must reflect these values (not the
+        // hardcoded defaults), proving the config is wired up.
+        let cfg = ResilienceConfig {
+            initial_backoff_ms: 100,
+            max_backoff_ms: 1000,
+            backoff_multiplier: 2.0,
+            jitter_ms: 10,
+            ..Default::default()
+        };
+        // attempt 0: base = 100ms
+        let d0 = backoff_delay(0, &cfg);
+        assert!(d0 >= Duration::from_millis(100));
+        assert!(d0 <= Duration::from_millis(100 + 2 * 10));
+        // attempt 1: base = 200ms
+        let d1 = backoff_delay(1, &cfg);
+        assert!(d1 >= Duration::from_millis(200));
+        assert!(d1 <= Duration::from_millis(200 + 2 * 10));
+        // Large attempt must be capped at max_backoff_ms (plus jitter).
+        let d_capped = backoff_delay(50, &cfg);
+        assert!(d_capped >= Duration::from_millis(1000));
+        assert!(d_capped <= Duration::from_millis(1000 + 2 * 10));
     }
 
     #[test]
