@@ -204,17 +204,28 @@ where
 
         // Main reconnection loop.
         'outer: loop {
+            // Pre-compute channel names for logging before connection attempt.
+            let subscribe_channels = adapter.subscribe_msgs();
+            let channel_names: String = subscribe_channels
+                .iter()
+                .map(|(c, _)| c.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+
             // Establish WebSocket connection.
             let ws_stream = match tokio_tungstenite::connect_async(&url).await {
                 Ok((stream, _)) => stream,
                 Err(e) => {
                     error!(
-                        "[WS connect failed] exchange={exchange} instrument={instrument} url={url} error={e}"
+                        "[WS connect failed] exchange={exchange} instrument={instrument} channel={channel_names} url={url} error={e}"
                     );
                     attempt += 1;
                     if let Some(max) = max_attempts
                         && attempt >= max as u64
                     {
+                        error!(
+                            "[WS max reconnects exceeded] exchange={exchange} instrument={instrument} channel={channel_names} attempt={attempt} max_attempts={max_attempts:?}"
+                        );
                         return Err(IngestError::MaxReconnectsExceeded(attempt as u32));
                     }
                     let delay = backoff_delay(attempt - 1, &resilience);
@@ -222,18 +233,14 @@ where
                     continue;
                 }
             };
-            info!("[WS connected] exchange={exchange} instrument={instrument} url={url}");
+            info!(
+                "[WS connected] exchange={exchange} instrument={instrument} channel={channel_names} url={url}"
+            );
 
             // Split into sender and receiver.
             let (mut write, mut read) = ws_stream.split();
 
-            // Send subscription messages.
-            let subscribe_channels = adapter.subscribe_msgs();
-            let channel_names: String = subscribe_channels
-                .iter()
-                .map(|(c, _)| c.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
+            // Send subscription messages (channel_names pre-computed above).
             for (channel, msg) in subscribe_channels {
                 match write.send(Message::Text(msg)).await {
                     Ok(()) => {
@@ -249,6 +256,9 @@ where
                         if let Some(max) = max_attempts
                             && attempt >= max as u64
                         {
+                            error!(
+                                "[WS max reconnects exceeded] exchange={exchange} instrument={instrument} channel={channel} attempt={attempt} max_attempts={max_attempts:?}"
+                            );
                             return Err(IngestError::MaxReconnectsExceeded(attempt as u32));
                         }
                         let delay = backoff_delay(attempt - 1, &resilience);
@@ -316,7 +326,7 @@ where
                                 // pong
                             }
                             Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))) => {
-                                info!("[WS received close frame] exchange={exchange} instrument={instrument}");
+                                info!("[WS received close frame] exchange={exchange} instrument={instrument} channel={channel_names}");
                                 break 'read;
                             }
                             Some(Err(e)) => {
@@ -325,7 +335,7 @@ where
                             }
                             None => {
                                 // Stream ended.
-                                info!("[WS stream ended] exchange={exchange} instrument={instrument}");
+                                info!("[WS stream ended] exchange={exchange} instrument={instrument} channel={channel_names}");
                                 break 'read;
                             }
                         }
@@ -357,21 +367,36 @@ where
             if let Some(max) = max_attempts
                 && attempt >= max as u64
             {
+                error!(
+                    "[WS max reconnects exceeded] exchange={exchange} instrument={instrument} channel={channel_names} attempt={attempt} max_attempts={max_attempts:?}"
+                );
                 return Err(IngestError::MaxReconnectsExceeded(attempt as u32));
             }
 
             // Optional: fetch snapshot on reconnect (e.g., Bitstamp).
-            if let Ok(items) = adapter.on_reconnect().await {
-                for item in items {
-                    if tx.send(Ok(item)).await.is_err() {
-                        // Receiver dropped.
-                        break 'outer Err(IngestError::ChannelClosed);
+            match adapter.on_reconnect().await {
+                Ok(items) => {
+                    for item in items {
+                        if tx.send(Ok(item)).await.is_err() {
+                            // Receiver dropped.
+                            break 'outer Err(IngestError::ChannelClosed);
+                        }
                     }
+                }
+                Err(e) => {
+                    warn!(
+                        "[WS reconnect snapshot failed] exchange={exchange} instrument={instrument} channel={channel_names} error={e}"
+                    );
                 }
             }
 
             // Backoff before next reconnect attempt.
             let delay = backoff_delay(attempt - 1, &resilience);
+            warn!(
+                "[WS reconnecting] exchange={exchange} instrument={instrument} channel={channel_names} attempt={attempt} delay_ms={} max_attempts={:?}",
+                delay.as_millis(),
+                max_attempts
+            );
             sleep(delay).await;
         }
     });
