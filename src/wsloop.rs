@@ -140,6 +140,9 @@ pub trait ExchangeAdapter: Send + 'static {
     /// Instrument symbol (exchange-native, e.g. "BTC-USDT").
     fn instrument(&self) -> &str;
 
+    /// Exchange name (e.g. "okx", "kraken", "bitstamp").
+    fn exchange(&self) -> &str;
+
     /// WebSocket URL for this exchange/region.
     fn url(&self) -> String;
 
@@ -193,6 +196,7 @@ where
 
     // Clone data needed inside the async task.
     let instrument = adapter.instrument().to_string();
+    let exchange = adapter.exchange().to_string();
     let url = adapter.url();
     let max_attempts = config.resilience.max_attempts;
     let silence_timeout_secs = config.resilience.silence_timeout_secs;
@@ -207,7 +211,9 @@ where
             let ws_stream = match tokio_tungstenite::connect_async(&url).await {
                 Ok((stream, _)) => stream,
                 Err(e) => {
-                    error!("[WS connect failed] instrument={instrument} url={url} error={e}");
+                    error!(
+                        "[WS connect failed] exchange={exchange} instrument={instrument} url={url} error={e}"
+                    );
                     attempt += 1;
                     if let Some(max) = max_attempts
                         && attempt >= max as u64
@@ -219,7 +225,7 @@ where
                     continue;
                 }
             };
-            info!("[WS connected] instrument={instrument} url={url}");
+            info!("[WS connected] exchange={exchange} instrument={instrument} url={url}");
 
             // Split into sender and receiver.
             let (mut write, mut read) = ws_stream.split();
@@ -234,11 +240,13 @@ where
             for (channel, msg) in subscribe_channels {
                 match write.send(Message::Text(msg)).await {
                     Ok(()) => {
-                        info!("[WS subscribed] instrument={instrument} channel={channel}");
+                        info!(
+                            "[WS subscribed] exchange={exchange} instrument={instrument} channel={channel}"
+                        );
                     }
                     Err(e) => {
                         error!(
-                            "[WS subscribe failed] instrument={instrument} channel={channel} error={e}"
+                            "[WS subscribe failed] exchange={exchange} instrument={instrument} channel={channel} error={e}"
                         );
                         attempt += 1;
                         if let Some(max) = max_attempts
@@ -293,16 +301,16 @@ where
                                         }
                                     }
                                     Err(e) => {
-                                        warn!("[Failed to parse WS message] instrument={instrument} text={text} error={e}");
+                                        warn!("[Failed to parse WS message] exchange={exchange} instrument={instrument} text={text} error={e}");
                                         // Continue; don't break the connection on parse errors.
                                     }
                                 }
                             }
                             Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(_))) => {
-                                debug!("[Unexpected binary message] instrument={instrument}");
+                                debug!("[Unexpected binary message] exchange={exchange} instrument={instrument}");
                             }
                             Some(Ok(tokio_tungstenite::tungstenite::Message::Frame(_))) => {
-                                debug!("[Unexpected raw frame] instrument={instrument}");
+                                debug!("[Unexpected raw frame] exchange={exchange} instrument={instrument}");
                             }
                             Some(Ok(tokio_tungstenite::tungstenite::Message::Ping(_))) => {
                                 // tungstenite handles ping/pong automatically at the ws level.
@@ -311,23 +319,23 @@ where
                                 // pong
                             }
                             Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))) => {
-                                info!("[WS received close frame] instrument={instrument}");
+                                info!("[WS received close frame] exchange={exchange} instrument={instrument}");
                                 break 'read;
                             }
                             Some(Err(e)) => {
-                                error!("[WS read error] instrument={instrument} error={e}");
+                                error!("[WS read error] exchange={exchange} instrument={instrument} error={e}");
                                 break 'read;
                             }
                             None => {
                                 // Stream ended.
-                                info!("[WS stream ended] instrument={instrument}");
+                                info!("[WS stream ended] exchange={exchange} instrument={instrument}");
                                 break 'read;
                             }
                         }
                     }
                     // Check if the sender channel is closed (receiver dropped).
                     _ = tx.closed() => {
-                        info!("[Receiver dropped, shutting down] instrument={instrument}");
+                        info!("[Receiver dropped, shutting down] exchange={exchange} instrument={instrument}");
                         break 'read;
                     }
                     // Silence timeout: channel has not received any message
@@ -336,7 +344,7 @@ where
                     _ = &mut silence_sleep => {
                         if let Some(secs) = silence_timeout_secs {
                             warn!(
-                                "[WS channel silent for >{secs}s] instrument={instrument} channel={channel_names}"
+                                "[WS channel silent for >{secs}s] exchange={exchange} instrument={instrument} channel={channel_names}"
                             );
                             break 'read;
                         }
