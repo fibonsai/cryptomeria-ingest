@@ -25,7 +25,6 @@ fn okx_adapter_subscribe_msgs_covers_lob_and_trades() {
         "global".into(),
         0.0,
         None,
-        400,
         DataKind::LOB | DataKind::TRADE,
     );
     let msgs = adapter.subscribe_msgs();
@@ -46,7 +45,6 @@ fn okx_url_for_region() {
         "europe".into(),
         0.0,
         None,
-        400,
         DataKind::LOB | DataKind::TRADE,
     );
     assert!(adapter.url().contains("wss://"));
@@ -59,7 +57,6 @@ fn okx_trade_seq_id_from_realistic_fixture() {
         "global".into(),
         0.0,
         None,
-        400,
         DataKind::LOB | DataKind::TRADE,
     );
     // Realistic OKX v5 trades channel push: `seqId` arrives as an integer

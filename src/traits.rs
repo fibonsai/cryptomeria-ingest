@@ -6,7 +6,6 @@ pub type LevelsWithinPct = (LevelVec, LevelVec);
 /// Shared OrderBook trait — methods common across all exchange order books.
 pub trait OrderBook {
     fn new() -> Self;
-    fn with_snapshot_depth(depth: usize) -> Self;
     fn num_bids(&self) -> usize;
     fn num_asks(&self) -> usize;
     fn best_bid(&self) -> Option<f64>;

@@ -34,11 +34,10 @@ pub struct BitstampAdapter {
     pub cli_instrument: String,
     pub max_level_pct: f64,
     pub max_level: Option<usize>,
-    pub snapshot_depth: usize,
     pub data_kind: DataKind,
     book: OrderBook,
-    prev_lob: Option<LobItem>, // Track previous LOB for duplicate detection
-    trade_seq: u64, // Synthetic monotonic counter for seq_id (persists across reconnects)
+    prev_lob: Option<LobItem>,
+    trade_seq: u64,
 }
 
 impl BitstampAdapter {
@@ -50,7 +49,6 @@ impl BitstampAdapter {
         cli_instrument: String,
         max_level_pct: f64,
         max_level: Option<usize>,
-        snapshot_depth: usize,
         data_kind: DataKind,
     ) -> Self {
         Self {
@@ -60,7 +58,6 @@ impl BitstampAdapter {
             cli_instrument,
             max_level_pct,
             max_level,
-            snapshot_depth,
             data_kind,
             book: OrderBook::new(),
             prev_lob: None,
@@ -91,10 +88,12 @@ impl BitstampAdapter {
     ///
     /// Returns a Vec of MarketDataItem representing the LOB snapshot (as a single LobItem).
     async fn fetch_snapshot(&self) -> Result<Vec<MarketDataItem>, String> {
+        let depth = self.max_level.unwrap_or(400);
         let url = format!(
-            "{}/order_book/{}",
+            "{}/order_book/{}?group={}",
             rest_url(&self.region, &self.exchange),
-            self.cli_instrument
+            self.cli_instrument,
+            depth
         );
         let resp = reqwest::get(&url)
             .await
@@ -248,7 +247,6 @@ mod tests {
             "BTC/USD".into(),
             0.0,
             None,
-            400,
             DataKind::LOB | DataKind::TRADE,
         )
     }
@@ -261,7 +259,6 @@ mod tests {
             "BTC/USD".into(),
             0.0,
             None,
-            400,
             data_kind,
         )
     }

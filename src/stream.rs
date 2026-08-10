@@ -104,8 +104,8 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_stream_validation_max_level_pct_conflict() {
+    #[test]
+    fn test_stream_validation_max_level_pct_no_conflict() {
         let config = DataSourceConfig {
             exchange: "okx".into(),
             region: "global".into(),
@@ -115,11 +115,9 @@ mod tests {
             max_level_pct: 0.5,
             ..Default::default()
         };
-        match stream(config).await {
-            Err(IngestError::Config(msg))
-                if msg.contains("max_level and max_level_pct cannot both be set") => {}
-            Err(e) => panic!("unexpected error: {e}"),
-            Ok(_) => panic!("expected error"),
-        }
+        assert!(
+            config.validate().is_ok(),
+            "max_level and max_level_pct should now be allowed together"
+        );
     }
 }

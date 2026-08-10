@@ -22,7 +22,6 @@ pub async fn build_channel_streams(
     let region = config.region.clone();
     let max_level_pct = config.max_level_pct;
     let max_level = config.max_level;
-    let snapshot_depth = config.snapshot_depth;
     crate::wsloop::spawn_per_channel_streams(config, &kinds, move |kind| {
         BitstampAdapter::new(
             validated_instrument.clone(),
@@ -31,7 +30,6 @@ pub async fn build_channel_streams(
             validated_instrument.clone(),
             max_level_pct,
             max_level,
-            snapshot_depth,
             kind,
         )
     })

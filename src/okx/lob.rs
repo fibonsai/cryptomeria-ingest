@@ -245,6 +245,13 @@ impl OrderBook {
         let bid_best = self.best_bid();
         let ask_best = self.best_ask();
 
+        // Normalize max_level_pct: 0.0 or >= 100.0 means no filtering (treat as 100.0).
+        let max_level_pct = if max_level_pct == 0.0 || max_level_pct >= 100.0 {
+            100.0
+        } else {
+            max_level_pct
+        };
+
         // Filter and sort bids: ascending (worst to best), so best_bid is last
         let mut bids: Vec<LobLevel> = self
             .bids
@@ -256,7 +263,7 @@ impl OrderBook {
                     return None;
                 }
                 // Apply max_level_pct filter
-                if max_level_pct > 0.0
+                if max_level_pct < 100.0
                     && let Some(best) = bid_best
                     && price < best * (1.0 - max_level_pct / 100.0)
                 {
@@ -294,7 +301,7 @@ impl OrderBook {
                     return None;
                 }
                 // Apply max_level_pct filter
-                if max_level_pct > 0.0
+                if max_level_pct < 100.0
                     && let Some(best) = ask_best
                     && price > best * (1.0 + max_level_pct / 100.0)
                 {
@@ -337,9 +344,6 @@ impl OrderBook {
 
 impl OrderBookTrait for OrderBook {
     fn new() -> Self {
-        OrderBook::new()
-    }
-    fn with_snapshot_depth(_depth: usize) -> Self {
         OrderBook::new()
     }
     fn num_bids(&self) -> usize {
@@ -780,5 +784,54 @@ mod tests {
             (lob.asks[0].price - 101.0).abs() < f64::EPSILON,
             "Best ask (101.0) should be first element"
         );
+    }
+
+    #[test]
+    fn test_to_lob_item_pct_zero_keeps_all_levels() {
+        let mut book = OrderBook::new();
+        book.apply_snapshot(
+            &[
+                price_level("100.0", "1.0"),
+                price_level("99.0", "2.0"),
+                price_level("98.0", "3.0"),
+            ],
+            Side::Bid,
+        );
+        book.apply_snapshot(
+            &[
+                price_level("101.0", "1.0"),
+                price_level("102.0", "2.0"),
+                price_level("103.0", "3.0"),
+            ],
+            Side::Ask,
+        );
+        // max_level_pct = 0.0 should be normalized to 100.0 → no filtering
+        let lob = book.to_lob_item(0, "test", None, 0.0).unwrap();
+        assert_eq!(lob.bids.len(), 3, "pct=0.0 should keep all bids");
+        assert_eq!(lob.asks.len(), 3, "pct=0.0 should keep all asks");
+    }
+
+    #[test]
+    fn test_to_lob_item_pct_100_keeps_all_levels() {
+        let mut book = OrderBook::new();
+        book.apply_snapshot(&[price_level("100.0", "1.0")], Side::Bid);
+        book.apply_snapshot(&[price_level("101.0", "1.0")], Side::Ask);
+        let lob = book.to_lob_item(0, "test", None, 100.0).unwrap();
+        assert_eq!(lob.bids.len(), 1);
+        assert_eq!(lob.asks.len(), 1);
+    }
+
+    #[test]
+    fn test_to_lob_item_pct_above_100_keeps_all_levels() {
+        let mut book = OrderBook::new();
+        book.apply_snapshot(
+            &[price_level("100.0", "1.0"), price_level("50.0", "2.0")],
+            Side::Bid,
+        );
+        book.apply_snapshot(&[price_level("101.0", "1.0")], Side::Ask);
+        // max_level_pct = 150.0 should be normalized to 100.0 → no filtering
+        let lob = book.to_lob_item(0, "test", None, 150.0).unwrap();
+        assert_eq!(lob.bids.len(), 2, "pct=150.0 should keep all bids");
+        assert_eq!(lob.asks.len(), 1);
     }
 }

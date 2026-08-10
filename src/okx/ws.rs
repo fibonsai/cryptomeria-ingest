@@ -30,10 +30,9 @@ pub struct OkxAdapter {
     exchange: &'static str,
     pub max_level_pct: f64,
     pub max_level: Option<usize>,
-    pub snapshot_depth: usize,
     pub data_kind: DataKind,
     book: OrderBook,
-    prev_lob: Option<LobItem>, // Track previous LOB for duplicate detection
+    prev_lob: Option<LobItem>,
 }
 
 impl OkxAdapter {
@@ -42,7 +41,6 @@ impl OkxAdapter {
         region: String,
         max_level_pct: f64,
         max_level: Option<usize>,
-        snapshot_depth: usize,
         data_kind: DataKind,
     ) -> Self {
         Self {
@@ -51,7 +49,6 @@ impl OkxAdapter {
             exchange: "okx",
             max_level_pct,
             max_level,
-            snapshot_depth,
             data_kind,
             book: OrderBook::new(),
             prev_lob: None,
@@ -191,20 +188,12 @@ mod tests {
             "global".into(),
             0.0,
             None,
-            400,
             DataKind::LOB | DataKind::TRADE,
         )
     }
 
     fn adapter_with_kind(data_kind: DataKind) -> OkxAdapter {
-        OkxAdapter::new(
-            "BTC-USDT".into(),
-            "global".into(),
-            0.0,
-            None,
-            400,
-            data_kind,
-        )
+        OkxAdapter::new("BTC-USDT".into(), "global".into(), 0.0, None, data_kind)
     }
 
     #[test]

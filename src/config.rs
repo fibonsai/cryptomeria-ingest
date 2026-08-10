@@ -199,12 +199,9 @@ pub struct DataSourceConfig {
     pub data_kind: DataKind,
     /// Maximum number of price levels per side (None = no limit).
     pub max_level: Option<usize>,
-    /// Maximum percentage from best price (0.0 = no limit).
+    /// Maximum percentage from best price (0.0 or 100.0 = no limit, all levels kept).
     #[serde(default)]
     pub max_level_pct: f64,
-    /// Snapshot depth for Bitstamp REST fetch (default 400).
-    #[serde(default = "default_snapshot_depth")]
-    pub snapshot_depth: usize,
     /// Reconnection/backoff settings.
     #[serde(default)]
     pub resilience: ResilienceConfig,
@@ -214,10 +211,6 @@ pub struct DataSourceConfig {
     /// exchange-only fallback shared by all instruments when no alias matches.
     #[serde(default)]
     pub fallback: HashMap<String, HashMap<String, ExchangeFallbackMapping>>,
-}
-
-fn default_snapshot_depth() -> usize {
-    400
 }
 
 impl DataSourceConfig {
@@ -241,14 +234,8 @@ impl DataSourceConfig {
         if self.data_kind.is_empty() {
             return Err(ConfigError::EmptyDataKind);
         }
-        if self.max_level.is_some() && self.max_level_pct > 0.0 {
-            return Err(ConfigError::MaxLevelAndPctConflict);
-        }
         if self.max_level.is_some() && !self.data_kind.contains(DataKind::LOB) {
             return Err(ConfigError::MaxLevelWithoutLob);
-        }
-        if self.snapshot_depth == 0 {
-            return Err(ConfigError::InvalidSnapshotDepth);
         }
         Ok(())
     }
@@ -262,9 +249,7 @@ pub enum ConfigError {
     UnknownRegion(String),
     MissingInstrument,
     EmptyDataKind,
-    MaxLevelAndPctConflict,
     MaxLevelWithoutLob,
-    InvalidSnapshotDepth,
 }
 
 impl std::fmt::Display for ConfigError {
@@ -276,13 +261,9 @@ impl std::fmt::Display for ConfigError {
             ConfigError::UnknownRegion(r) => write!(f, "unknown region: {r}"),
             ConfigError::MissingInstrument => write!(f, "instrument is required"),
             ConfigError::EmptyDataKind => write!(f, "data_kind must include at least Lob or Trade"),
-            ConfigError::MaxLevelAndPctConflict => {
-                write!(f, "max_level and max_level_pct cannot both be set")
-            }
             ConfigError::MaxLevelWithoutLob => {
                 write!(f, "max_level requires data_kind to include Lob")
             }
-            ConfigError::InvalidSnapshotDepth => write!(f, "snapshot_depth must be > 0"),
         }
     }
 }
@@ -299,7 +280,6 @@ impl Default for DataSourceConfig {
             data_kind: DataKind::empty(),
             max_level: None,
             max_level_pct: 0.0,
-            snapshot_depth: 400,
             resilience: ResilienceConfig::default(),
             fallback: HashMap::new(),
         }
@@ -505,21 +485,6 @@ mod tests {
     }
 
     #[test]
-    fn test_data_source_config_validate_max_level_and_pct_conflict() {
-        let cfg = DataSourceConfig {
-            exchange: "okx".into(),
-            region: "global".into(),
-            instrument: "BTC-USDT".into(),
-            data_kind: DataKind::LOB,
-            max_level: Some(10),
-            max_level_pct: 0.5,
-            ..Default::default()
-        };
-        let err = cfg.validate().unwrap_err();
-        assert!(matches!(err, ConfigError::MaxLevelAndPctConflict));
-    }
-
-    #[test]
     fn test_data_source_config_validate_max_level_without_lob() {
         let cfg = DataSourceConfig {
             exchange: "okx".into(),
@@ -531,20 +496,6 @@ mod tests {
         };
         let err = cfg.validate().unwrap_err();
         assert!(matches!(err, ConfigError::MaxLevelWithoutLob));
-    }
-
-    #[test]
-    fn test_data_source_config_validate_invalid_snapshot_depth() {
-        let cfg = DataSourceConfig {
-            exchange: "okx".into(),
-            region: "global".into(),
-            instrument: "BTC-USDT".into(),
-            data_kind: DataKind::LOB,
-            snapshot_depth: 0,
-            ..Default::default()
-        };
-        let err = cfg.validate().unwrap_err();
-        assert!(matches!(err, ConfigError::InvalidSnapshotDepth));
     }
 
     #[test]
@@ -571,16 +522,8 @@ mod tests {
             "data_kind must include at least Lob or Trade"
         );
         assert_eq!(
-            ConfigError::MaxLevelAndPctConflict.to_string(),
-            "max_level and max_level_pct cannot both be set"
-        );
-        assert_eq!(
             ConfigError::MaxLevelWithoutLob.to_string(),
             "max_level requires data_kind to include Lob"
-        );
-        assert_eq!(
-            ConfigError::InvalidSnapshotDepth.to_string(),
-            "snapshot_depth must be > 0"
         );
     }
 }

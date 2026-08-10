@@ -9,7 +9,7 @@ use std::fs;
 #[clap(
     version = "1.0",
     about = "Demo for cryptomeria-ingest",
-    long_about = "Provides a CLI to connect to OKX, Kraken, or Bitstamp WebSocket streams and consumes cryptomeria-ingest configuration parameters such as exchange, region, instrument, data_kind, max_level, max_level_pct, snapshot_depth, and resilience settings."
+    long_about = "Provides a CLI to connect to OKX, Kraken, or Bitstamp WebSocket streams and consumes cryptomeria-ingest configuration parameters such as exchange, region, instrument, data_kind, max_level, max_level_pct, and resilience settings."
 )]
 struct Cli {
     #[clap(long)]
@@ -30,8 +30,6 @@ struct Cli {
     max_level: Option<usize>,
     #[clap(long)]
     max_level_pct: Option<f64>,
-    #[clap(long)]
-    snapshot_depth: Option<usize>,
     #[clap(flatten)]
     resilience: ResilienceCli,
 }
@@ -100,7 +98,6 @@ async fn main() {
             data_kind,
             max_level: cli.max_level,
             max_level_pct: cli.max_level_pct.unwrap_or(0.0),
-            snapshot_depth: cli.snapshot_depth.unwrap_or(400),
             resilience: ResilienceConfig {
                 initial_backoff_ms: cli.resilience.initial_backoff_ms,
                 max_backoff_ms: cli.resilience.max_backoff_ms,
