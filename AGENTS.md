@@ -54,7 +54,7 @@ Multi-exchange crypto market data ingestion library (OKX, Kraken, Bitstamp) that
 - See `src/config.rs` for DataSourceConfig structure
 - Supported exchanges: "okx", "kraken", "bitstamp"
 - Data kinds: Lob (Limit Order Book), Trade (can be combined with |)
-- Configuration includes resilience settings, snapshot depth, level filtering
+- Configuration includes resilience settings, level filtering
 
 ## Skill Activation
 

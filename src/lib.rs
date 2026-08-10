@@ -18,7 +18,6 @@
 //!         data_kind: DataKind::LOB | DataKind::TRADE,
 //!         max_level: None,
 //!         max_level_pct: 0.0,
-//!         snapshot_depth: 400,
 //!         ..Default::default()
 //!     };
 //!     config.validate()?;

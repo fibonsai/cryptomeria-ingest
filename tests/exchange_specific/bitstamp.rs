@@ -20,7 +20,6 @@ fn bitstamp_adapter_subscribe_msgs_covers_orders_and_trades() {
         "BTC/USD".into(),
         0.0,
         None,
-        400,
         DataKind::LOB | DataKind::TRADE,
     );
     let msgs = adapter.subscribe_msgs();

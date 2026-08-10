@@ -10,7 +10,7 @@ Connects to WebSocket feeds (OKX, Kraken, Bitstamp) and returns a stream of norm
 
 - ✅ **Multiple exchanges**: OKX, Kraken, Bitstamp
 - ✅ **Normalized output**: Consistent `MarketDataItem` enum (`Lob` or `Trade`)
-- ✅ **LOB pre-filtering**: `max_level` or `max_level_pct` (client-side post-processing)
+- ✅ **LOB pre-filtering**: `max_level` and `max_level_pct` applied together (client-side post-processing)
 - ✅ **Snapshot-first stream**: First `LobItem` is a full snapshot, followed by increments
 - ✅ **Automatic reconnection**: Exponential backoff with jitter
 - ✅ **Heartbeat handling**: Exchange-specific (Kraken) and WebSocket-level
@@ -48,7 +48,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         data_kind: DataKind::LOB | DataKind::TRADE, // subscribe to both
         max_level: None,
         max_level_pct: 0.0,
-        snapshot_depth: 400,
         ..Default::default()
     };
     config.validate()?;
@@ -82,8 +81,7 @@ Configuration for a single market data stream.
 | `instrument` | `String` | Instrument symbol in exchange-native format (e.g., `"BTC-USDT"` for OKX, `"XBT/USD"` for Kraken, `"BTC/USD"` for Bitstamp) |
 | `data_kind` | `DataKind` | Set of `LOB` and/or `TRADE` (use `|` for both) |
 | `max_level` | `Option<usize>` | Maximum number of price levels per side (`None` = no limit) |
-| `max_level_pct` | `f64` | Maximum percentage from best price (e.g., `1.0` for ±1%) |
-| `snapshot_depth` | `usize` | Depth for REST snapshot (Bitstamp only, default 400) |
+| `max_level_pct` | `f64` | Maximum percentage from best price (e.g., `1.0` for ±1%). Values of `0`, `100`, or unset are treated as `100` (no filtering) |
 | `resilience` | `ResilienceConfig` | Reconnection/backoff/heartbeat settings |
 
 ### `DataKind`
@@ -413,8 +411,7 @@ cargo run --release --bin cryptomeria-ingest-demo -- \
   --instrument BTC-USDT \
   --data-kind both \
   --max-level 5 \
-  --max-level-pct 0.0 \
-  --snapshot-depth 400
+  --max-level-pct 0.0
 ```
 
 ### Install locally (makes `cryptomeria-ingest-demo` available in `~/.cargo/bin`)

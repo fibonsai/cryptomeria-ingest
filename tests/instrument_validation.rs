@@ -77,7 +77,6 @@ fn test_data_source_config_with_fallback() {
         data_kind: cryptomeria_ingest::config::DataKind::LOB,
         max_level: None,
         max_level_pct: 0.0,
-        snapshot_depth: 400,
         resilience: cryptomeria_ingest::config::ResilienceConfig::default(),
         fallback,
     };
