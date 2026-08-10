@@ -2,9 +2,8 @@ use crate::config::DataKind;
 use crate::items::{LobItem, MarketDataItem, TradeItem};
 use crate::kraken::lob::OrderBook;
 use crate::kraken::types::{KrakenWsMessage, MessageType, TradeData};
-use crate::logger::logger as log;
 use crate::wsloop::ExchangeAdapter;
-use rasant::Level;
+use log::{info, warn};
 
 /// Subscribe message builder for Kraken.
 pub fn build_subscribe_msg(channel: &str, instrument: &str) -> String {
@@ -112,7 +111,6 @@ impl ExchangeAdapter for KrakenAdapter {
     }
 
     fn handle_message(&mut self, msg: &Self::Message) -> Option<MarketDataItem> {
-        let mut logger = log().lock().unwrap();
         match msg.message_type() {
             MessageType::L2Snapshot | MessageType::L2Update | MessageType::L2 => {
                 if !self.data_kind.contains(DataKind::LOB) {
@@ -154,27 +152,21 @@ impl ExchangeAdapter for KrakenAdapter {
                         seq_id,
                     }))
                 } else {
-                    logger.log(Level::Warning, "[kraken] failed to parse trade data");
+                    warn!("[kraken] failed to parse trade data");
                     None
                 }
             }
             MessageType::Heartbeat | MessageType::Status => None,
             MessageType::Instrument => {
-                logger.log(
-                    Level::Info,
-                    &format!("[kraken] instrument channel: {}", msg.summary()),
-                );
+                info!("[kraken] instrument channel: {}", msg.summary());
                 None
             }
             MessageType::Event => {
-                logger.log(Level::Info, &format!("[kraken] event: {}", msg.summary()));
+                info!("[kraken] event: {}", msg.summary());
                 None
             }
             MessageType::Unknown => {
-                logger.log(
-                    Level::Warning,
-                    &format!("[kraken] unknown message: {}", msg.summary()),
-                );
+                warn!("[kraken] unknown message: {}", msg.summary());
                 None
             }
         }

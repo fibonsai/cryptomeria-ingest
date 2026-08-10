@@ -1,7 +1,6 @@
 use crate::config::{DataSourceConfig, ExchangeFallbackMapping};
 use crate::items::IngestError;
-use crate::logger::logger as log;
-use rasant::Level;
+use log::{error, info, warn};
 use std::collections::HashMap;
 
 /// Exchange-specific validator enum (dyn-compatible).
@@ -103,19 +102,14 @@ pub fn select_fallback_mapping<'a>(
 /// Validate instrument with fallback mapping.
 /// Returns the validated instrument (original or fallback) or an error.
 ///
-/// Logs through the rasant logger at:
+/// Logs through the `log` crate at:
 /// - **WARN** when a candidate instrument fails validation but more fallbacks are
 ///   still being tried,
 /// - **INFO** when a fallback instrument is successfully selected,
 /// - **ERROR** when no fallback could be found (before returning `IngestError::Config`).
-// rasant's `Logger` writes to a stdout sink only — the `log` method never blocks
-// or yields, so holding the `MutexGuard` across `.await` points is safe in practice.
-#[allow(clippy::await_holding_lock)]
 pub async fn validate_with_fallback(config: &DataSourceConfig) -> Result<String, IngestError> {
     let validator = ExchangeValidator::from_exchange_name(&config.exchange)
         .ok_or_else(|| IngestError::Config(format!("Unknown exchange: {}", config.exchange)))?;
-
-    let mut logger = log().lock().unwrap();
 
     // First, try the original instrument
     match validator
@@ -124,14 +118,11 @@ pub async fn validate_with_fallback(config: &DataSourceConfig) -> Result<String,
     {
         Ok(()) => return Ok(config.instrument.clone()),
         Err(e) => {
-            logger.log(
-                Level::Warning,
-                &format!(
-                    "[{}] Instrument '{}' validation failed: {}",
-                    validator.exchange_name(),
-                    config.instrument,
-                    e
-                ),
+            warn!(
+                "[{}] Instrument '{}' validation failed: {}",
+                validator.exchange_name(),
+                config.instrument,
+                e
             );
         }
     }
@@ -147,40 +138,31 @@ pub async fn validate_with_fallback(config: &DataSourceConfig) -> Result<String,
                 .await
             {
                 Ok(()) => {
-                    logger.log(
-                        Level::Info,
-                        &format!(
-                            "[{}] Using fallback instrument: {} (original: {})",
-                            validator.exchange_name(),
-                            variant,
-                            config.instrument
-                        ),
+                    info!(
+                        "[{}] Using fallback instrument: {} (original: {})",
+                        validator.exchange_name(),
+                        variant,
+                        config.instrument
                     );
                     return Ok(variant);
                 }
                 Err(e) => {
-                    logger.log(
-                        Level::Warning,
-                        &format!(
-                            "[{}] Fallback '{}' validation failed: {}",
-                            validator.exchange_name(),
-                            variant,
-                            e
-                        ),
+                    warn!(
+                        "[{}] Fallback '{}' validation failed: {}",
+                        validator.exchange_name(),
+                        variant,
+                        e
                     );
                 }
             }
         }
     }
 
-    logger.log(
-        Level::Error,
-        &format!(
-            "[{}] Instrument '{}' not found on {} and no valid fallback mapping",
-            validator.exchange_name(),
-            config.instrument,
-            config.exchange
-        ),
+    error!(
+        "[{}] Instrument '{}' not found on {} and no valid fallback mapping",
+        validator.exchange_name(),
+        config.instrument,
+        config.exchange
     );
 
     Err(IngestError::Config(format!(
@@ -327,5 +309,13 @@ mod tests {
 
         assert!(select_fallback_mapping("okx", Some("btcusd"), &fallback).is_none());
         assert!(select_fallback_mapping("okx", None, &fallback).is_none());
+    }
+
+    #[test]
+    fn validate_with_fallback_future_is_send() {
+        fn assert_send<T: Send>(_: T) {}
+        let config = DataSourceConfig::default();
+        let fut = validate_with_fallback(&config);
+        assert_send(fut);
     }
 }

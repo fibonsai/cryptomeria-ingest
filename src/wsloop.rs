@@ -1,7 +1,6 @@
 use crate::items::{IngestError, MarketDataItem};
-use crate::logger::logger as log;
 use futures_util::{SinkExt, Stream, StreamExt, stream};
-use rasant::Level;
+use log::{debug, error, info, warn};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -208,10 +207,7 @@ where
             let ws_stream = match tokio_tungstenite::connect_async(&url).await {
                 Ok((stream, _)) => stream,
                 Err(e) => {
-                    log().lock().unwrap().log(
-                        Level::Error,
-                        &format!("[WS connect failed] instrument={instrument} url={url} error={e}"),
-                    );
+                    error!("[WS connect failed] instrument={instrument} url={url} error={e}");
                     attempt += 1;
                     if let Some(max) = max_attempts
                         && attempt >= max as u64
@@ -223,10 +219,7 @@ where
                     continue;
                 }
             };
-            log().lock().unwrap().log(
-                Level::Info,
-                &format!("[WS connected] instrument={instrument} url={url}"),
-            );
+            info!("[WS connected] instrument={instrument} url={url}");
 
             // Split into sender and receiver.
             let (mut write, mut read) = ws_stream.split();
@@ -241,17 +234,11 @@ where
             for (channel, msg) in subscribe_channels {
                 match write.send(Message::Text(msg)).await {
                     Ok(()) => {
-                        log().lock().unwrap().log(
-                            Level::Info,
-                            &format!("[WS subscribed] instrument={instrument} channel={channel}"),
-                        );
+                        info!("[WS subscribed] instrument={instrument} channel={channel}");
                     }
                     Err(e) => {
-                        log().lock().unwrap().log(
-                            Level::Error,
-                            &format!(
-                                "[WS subscribe failed] instrument={instrument} channel={channel} error={e}"
-                            ),
+                        error!(
+                            "[WS subscribe failed] instrument={instrument} channel={channel} error={e}"
                         );
                         attempt += 1;
                         if let Some(max) = max_attempts
@@ -306,19 +293,16 @@ where
                                         }
                                     }
                                     Err(e) => {
-                                        log().lock().unwrap().log(
-                                            Level::Warning,
-                                            &format!("[Failed to parse WS message] instrument={instrument} text={text} error={e}"),
-                                        );
+                                        warn!("[Failed to parse WS message] instrument={instrument} text={text} error={e}");
                                         // Continue; don't break the connection on parse errors.
                                     }
                                 }
                             }
                             Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(_))) => {
-                                log().lock().unwrap().log(Level::Debug, &format!("[Unexpected binary message] instrument={instrument}"));
+                                debug!("[Unexpected binary message] instrument={instrument}");
                             }
                             Some(Ok(tokio_tungstenite::tungstenite::Message::Frame(_))) => {
-                                log().lock().unwrap().log(Level::Debug, &format!("[Unexpected raw frame] instrument={instrument}"));
+                                debug!("[Unexpected raw frame] instrument={instrument}");
                             }
                             Some(Ok(tokio_tungstenite::tungstenite::Message::Ping(_))) => {
                                 // tungstenite handles ping/pong automatically at the ws level.
@@ -327,26 +311,23 @@ where
                                 // pong
                             }
                             Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))) => {
-                                log().lock().unwrap().log(Level::Info, &format!("[WS received close frame] instrument={instrument}"));
+                                info!("[WS received close frame] instrument={instrument}");
                                 break 'read;
                             }
                             Some(Err(e)) => {
-                                log().lock().unwrap().log(Level::Error, &format!("[WS read error] instrument={instrument} error={e}"));
+                                error!("[WS read error] instrument={instrument} error={e}");
                                 break 'read;
                             }
                             None => {
                                 // Stream ended.
-                                log().lock().unwrap().log(Level::Info, &format!("[WS stream ended] instrument={instrument}"));
+                                info!("[WS stream ended] instrument={instrument}");
                                 break 'read;
                             }
                         }
                     }
                     // Check if the sender channel is closed (receiver dropped).
                     _ = tx.closed() => {
-                        log().lock().unwrap().log(
-                            Level::Info,
-                            &format!("[Receiver dropped, shutting down] instrument={instrument}"),
-                        );
+                        info!("[Receiver dropped, shutting down] instrument={instrument}");
                         break 'read;
                     }
                     // Silence timeout: channel has not received any message
@@ -354,11 +335,8 @@ where
                     // failure and fall through to the existing reconnect path.
                     _ = &mut silence_sleep => {
                         if let Some(secs) = silence_timeout_secs {
-                            log().lock().unwrap().log(
-                                Level::Warning,
-                                &format!(
-                                    "[WS channel silent for >{secs}s] instrument={instrument} channel={channel_names}"
-                                ),
+                            warn!(
+                                "[WS channel silent for >{secs}s] instrument={instrument} channel={channel_names}"
                             );
                             break 'read;
                         }

@@ -66,6 +66,7 @@ fn parse_data_kind(s: &str) -> DataKind {
 
 #[tokio::main]
 async fn main() {
+    cryptomeria_ingest::logger::init();
     let cli = Cli::parse();
 
     // Load config from file if provided, otherwise use CLI flags

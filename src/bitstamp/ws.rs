@@ -2,10 +2,9 @@ use crate::bitstamp::lob::OrderBook;
 use crate::bitstamp::types::{BitstampWsMessage, MessageType, OrderBookData, TradeData};
 use crate::config::DataKind;
 use crate::items::{LobItem, MarketDataItem, TradeItem};
-use crate::logger::logger as log;
 use crate::urls::rest_url;
 use crate::wsloop::ExchangeAdapter;
-use rasant::Level;
+use log::{info, warn};
 
 /// Subscribe message builder for Bitstamp.
 pub fn build_subscribe_msg(channel: &str) -> String {
@@ -153,7 +152,6 @@ impl ExchangeAdapter for BitstampAdapter {
     }
 
     fn handle_message(&mut self, msg: &Self::Message) -> Option<MarketDataItem> {
-        let mut logger = log().lock().unwrap();
         match msg.message_type() {
             MessageType::L2Snapshot | MessageType::L2Update => {
                 if !self.data_kind.contains(DataKind::LOB) {
@@ -197,19 +195,16 @@ impl ExchangeAdapter for BitstampAdapter {
                         seq_id: Some(self.trade_seq),
                     }))
                 } else {
-                    logger.log(Level::Warning, "[bitstamp] failed to parse trade data");
+                    warn!("[bitstamp] failed to parse trade data");
                     None
                 }
             }
             MessageType::Event => {
-                logger.log(Level::Info, &format!("[bitstamp] event: {}", msg.summary()));
+                info!("[bitstamp] event: {}", msg.summary());
                 None
             }
             MessageType::Unknown => {
-                logger.log(
-                    Level::Warning,
-                    &format!("[bitstamp] unknown message: {}", msg.summary()),
-                );
+                warn!("[bitstamp] unknown message: {}", msg.summary());
                 None
             }
         }
