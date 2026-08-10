@@ -81,6 +81,10 @@ impl ExchangeAdapter for OkxAdapter {
         &self.instrument
     }
 
+    fn exchange(&self) -> &str {
+        self.exchange
+    }
+
     fn subscribe_msgs(&self) -> Vec<(String, String)> {
         let mut msgs = Vec::new();
         if self.data_kind.contains(DataKind::LOB) {
