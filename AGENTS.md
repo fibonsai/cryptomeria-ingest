@@ -1,7 +1,7 @@
 # Cryptomeria-Ingest Agent Instructions
 
 ## Project Overview
-Multi-exchange crypto market data ingestion library (OKX, Kraken, Bitstamp) that connects to exchange WebSocket streams and returns normalized LOB/trade data.
+Multi-exchange crypto market data ingestion library (OKX, Kraken, Bitstamp, Bitvavo) that connects to exchange WebSocket streams and returns normalized LOB/trade data.
 
 ## Essential Commands
 
@@ -22,7 +22,7 @@ Multi-exchange crypto market data ingestion library (OKX, Kraken, Bitstamp) that
 
 ### Testing Details
 - Unit tests: Located alongside source or in tests/ directory
-- Integration tests: See tests/okx_integration.rs, tests/kraken_integration.rs, tests/bitstamp_integration.rs
+- Integration tests: See tests/okx_integration.rs, tests/kraken_integration.rs, tests/bitstamp_integration.rs, tests/bitvavo_integration.rs
 - Run specific integration test: `cargo test --test okx_integration`
 
 **ALWAYS load 'rust-tdd' skill before create or update tests.**
@@ -31,7 +31,7 @@ Multi-exchange crypto market data ingestion library (OKX, Kraken, Bitstamp) that
 - `src/lib.rs` - Main library exports
 - `src/bin/demo.rs` - Example usage
 - `src/*` - Library modules (config, instrument, items, stream, traits, urls, logger, wsloop)
-- `src/okx/`, `src/kraken/`, `src/bitstamp/` - Exchange-specific implementations
+- `src/okx/`, `src/kraken/`, `src/bitstamp/`, `src/bitvavo/` - Exchange-specific implementations
 - `tests/` - Integration tests for each exchange
 
 ## Key Implementation Details
@@ -52,7 +52,7 @@ Multi-exchange crypto market data ingestion library (OKX, Kraken, Bitstamp) that
 
 ## Configuration
 - See `src/config.rs` for DataSourceConfig structure
-- Supported exchanges: "okx", "kraken", "bitstamp"
+- Supported exchanges: "okx", "kraken", "bitstamp", "bitvavo"
 - Data kinds: Lob (Limit Order Book), Trade (can be combined with |)
 - Configuration includes resilience settings, level filtering
 

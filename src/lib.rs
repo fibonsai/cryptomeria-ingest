@@ -1,6 +1,6 @@
 //! cryptomeria-ingest — Multi-exchange crypto market data ingestion library
 //!
-//! Connects to exchange WebSocket feeds (OKX, Kraken, Bitstamp) and returns a stream
+//! Connects to exchange WebSocket feeds (OKX, Kraken, Bitstamp, Bitvavo) and returns a stream
 //! of normalized LOB (Limit Order Book) and trade data.
 //!
 //! # Quick Start
@@ -43,6 +43,7 @@ pub mod urls;
 pub mod wsloop;
 
 pub mod bitstamp;
+pub mod bitvavo;
 pub mod kraken;
 pub mod okx;
 

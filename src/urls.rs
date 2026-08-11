@@ -25,6 +25,11 @@ static EXCHANGE_URL: LazyLock<RegionDict> = LazyLock::new(|| {
     bitstamp_global.insert("rest", "https://www.bitstamp.net/api/v2");
     global.insert("bitstamp", bitstamp_global);
 
+    let mut bitvavo_global = HashMap::new();
+    bitvavo_global.insert("websocket", "wss://ws-mdpro.bitvavo.com/v2/");
+    bitvavo_global.insert("rest", "https://api.bitvavo.com/v2");
+    global.insert("bitvavo", bitvavo_global);
+
     map.insert("global", global);
 
     let mut europe: ExchangeDict = HashMap::new();
@@ -43,6 +48,11 @@ static EXCHANGE_URL: LazyLock<RegionDict> = LazyLock::new(|| {
     bitstamp_europe.insert("websocket", "wss://ws.bitstamp.net");
     bitstamp_europe.insert("rest", "https://www.bitstamp.net/api/v2");
     europe.insert("bitstamp", bitstamp_europe);
+
+    let mut bitvavo_europe = HashMap::new();
+    bitvavo_europe.insert("websocket", "wss://ws-mdpro.bitvavo.com/v2/");
+    bitvavo_europe.insert("rest", "https://api.bitvavo.com/v2");
+    europe.insert("bitvavo", bitvavo_europe);
 
     map.insert("europe", europe);
 
@@ -95,5 +105,18 @@ mod tests {
             rest_url("global", "bitstamp"),
             "https://www.bitstamp.net/api/v2"
         );
+    }
+
+    #[test]
+    fn test_bitvavo_global_ws() {
+        assert_eq!(
+            websocket_url("global", "bitvavo"),
+            "wss://ws-mdpro.bitvavo.com/v2/"
+        );
+    }
+
+    #[test]
+    fn test_bitvavo_rest() {
+        assert_eq!(rest_url("global", "bitvavo"), "https://api.bitvavo.com/v2");
     }
 }
