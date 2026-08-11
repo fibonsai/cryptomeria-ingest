@@ -79,6 +79,8 @@ fn test_data_source_config_with_fallback() {
         max_level_pct: 0.0,
         resilience: cryptomeria_ingest::config::ResilienceConfig::default(),
         fallback,
+        api_key: None,
+        api_secret: None,
     };
 
     assert!(config.validate().is_ok());

@@ -27,6 +27,7 @@ pub async fn stream(
         "okx" => crate::okx::build_channel_streams(config, validated_instrument).await?,
         "kraken" => crate::kraken::build_channel_streams(config, validated_instrument).await?,
         "bitstamp" => crate::bitstamp::build_channel_streams(config, validated_instrument).await?,
+        "bitvavo" => crate::bitvavo::build_channel_streams(config, validated_instrument).await?,
         _ => {
             return Err(IngestError::Config(format!(
                 "unknown exchange: {}",

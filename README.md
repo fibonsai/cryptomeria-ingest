@@ -4,11 +4,11 @@
 
 Multi-exchange crypto market data ingestion library for Rust.
 
-Connects to WebSocket feeds (OKX, Kraken, Bitstamp) and returns a stream of normalized LOB (Limit Order Book) and trade data.
+Connects to WebSocket feeds (OKX, Kraken, Bitstamp, Bitvavo) and returns a stream of normalized LOB (Limit Order Book) and trade data.
 
 ## Features
 
-- ✅ **Multiple exchanges**: OKX, Kraken, Bitstamp
+- ✅ **Multiple exchanges**: OKX, Kraken, Bitstamp, Bitvavo
 - ✅ **Normalized output**: Consistent `MarketDataItem` enum (`Lob` or `Trade`)
 - ✅ **LOB pre-filtering**: `max_level` and `max_level_pct` applied together (client-side post-processing)
 - ✅ **Snapshot-first stream**: First `LobItem` is a full snapshot, followed by increments
@@ -76,13 +76,15 @@ Configuration for a single market data stream.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `exchange` | `String` | Exchange name: `"okx"`, `"kraken"`, `"bitstamp"` |
+| `exchange` | `String` | Exchange name: `"okx"`, `"kraken"`, `"bitstamp"`, `"bitvavo"` |
 | `region` | `String` | Region: `"global"` or `"europe"` |
 | `instrument` | `String` | Instrument symbol in exchange-native format (e.g., `"BTC-USDT"` for OKX, `"XBT/USD"` for Kraken, `"BTC/USD"` for Bitstamp) |
 | `data_kind` | `DataKind` | Set of `LOB` and/or `TRADE` (use `|` for both) |
 | `max_level` | `Option<usize>` | Maximum number of price levels per side (`None` = no limit) |
 | `max_level_pct` | `f64` | Maximum percentage from best price (e.g., `1.0` for ±1%). Values of `0`, `100`, or unset are treated as `100` (no filtering) |
 | `resilience` | `ResilienceConfig` | Reconnection/backoff/heartbeat settings |
+| `api_key` | `Option<String>` | API key for exchanges requiring WS authentication (Bitvavo); ignored otherwise |
+| `api_secret` | `Option<String>` | API secret for exchanges requiring WS authentication (Bitvavo); ignored otherwise |
 
 ### `DataKind`
 
@@ -127,7 +129,7 @@ Limit Order Book snapshot or incremental update.
 | Field | Type | Description |
 |-------|------|-------------|
 | `ts` | `u64` | Exchange timestamp in milliseconds since epoch |
-| `exchange` | `String` | Source exchange name: `"okx"`, `"kraken"`, `"bitstamp"` |
+| `exchange` | `String` | Source exchange name: `"okx"`, `"kraken"`, `"bitstamp"`, `"bitvavo"` |
 | `bids` | `Vec<LobLevel>` | Bid levels, sorted descending (best bid first) |
 | `asks` | `Vec<LobLevel>` | Ask levels, sorted ascending (best ask first) |
 
@@ -152,7 +154,7 @@ Trade execution.
 | `size` | `f64` | Trade size (quantity) |
 | `side` | `String` | `"buy"` or `"sell"` |
 | `trade_id` | `Option<String>` | Exchange-specific trade ID (if available) |
-| `seq_id` | `Option<u64>` | Exchange-specific sequence ID (OKX: `data[0].seqId`; Kraken: derived from the `trade_id` integer; Bitstamp: synthetic monotonic counter that persists across reconnects, since the exchange provides no trade sequence) |
+| `seq_id` | `Option<u64>` | Exchange-specific sequence ID (OKX: `data[0].seqId`; Kraken: derived from the `trade_id` integer; Bitstamp: synthetic monotonic counter that persists across reconnects, since the exchange provides no trade sequence; Bitvavo: synthetic monotonic counter) |
 
 ### `stream(config) -> Stream<Item = Result<MarketDataItem, IngestError>>`
 
@@ -210,7 +212,21 @@ let config = DataSourceConfig {
 };
 ```
 
-### 4. Apply LOB pre-filtering (top 20 levels)
+### 4. Subscribe to both LOB and trades (Bitvavo, requires credentials)
+
+```rust
+let config = DataSourceConfig {
+    exchange: "bitvavo".into(),
+    region: "global".into(),
+    instrument: "BTC-EUR".into(),
+    data_kind: DataKind::LOB | DataKind::TRADE,
+    api_key: Some("your_api_key".into()),
+    api_secret: Some("your_api_secret".into()),
+    ..Default::default()
+};
+```
+
+### 5. Apply LOB pre-filtering (top 20 levels)
 
 ```rust
 let config = DataSourceConfig {
@@ -223,7 +239,7 @@ let config = DataSourceConfig {
 };
 ```
 
-### 5. Apply LOB pre-filtering (±0.5% from best price)
+### 6. Apply LOB pre-filtering (±0.5% from best price)
 
 ```rust
 let config = DataSourceConfig {
@@ -236,7 +252,7 @@ let config = DataSourceConfig {
 };
 ```
 
-### 6. Custom resilience (fast retry, no jitter)
+### 7. Custom resilience (fast retry, no jitter)
 
 ```rust
 let config = DataSourceConfig {
@@ -255,7 +271,7 @@ let config = DataSourceConfig {
 };
 ```
 
-### 7. Disable heartbeat (default is disabled)
+### 8. Disable heartbeat (default is disabled)
 
 ```rust
 let config = DataSourceConfig {
@@ -271,7 +287,7 @@ let config = DataSourceConfig {
 };
 ```
 
-### 8. Limit reconnection attempts
+### 9. Limit reconnection attempts
 
 ```rust
 let config = DataSourceConfig {
@@ -287,7 +303,7 @@ let config = DataSourceConfig {
 };
 ```
 
-### 9. Detect silent WebSocket channels
+### 10. Detect silent WebSocket channels
 
 ```rust
 let config = DataSourceConfig {
@@ -313,7 +329,7 @@ behavior is unchanged.
 
 The flow is:
 
-1. The `stream()` calls `validate_with_fallback()`, which confirms the instrument exists on the exchange — via REST for OKX/Bitstamp and via the Kraken WebSocket v2 `instrument` channel for Kraken (to stay consistent with WS v2 symbol names).
+1. The `stream()` calls `validate_with_fallback()`, which confirms the instrument exists on the exchange — via REST for OKX, Bitstamp, and Bitvavo (`trading-pairs` endpoint) and via the Kraken WebSocket v2 `instrument` channel for Kraken (to stay consistent with WS v2 symbol names).
 2. If the primary instrument is rejected, fallback mappings generate candidate variants (see below) and each is tried until one is accepted.
 3. If no variant succeeds, `stream()` returns `IngestError::Config`.
 
@@ -430,7 +446,7 @@ cryptomeria-ingest-demo \
 
 ### Exchange Adapters
 
-Each exchange adapter (`okx::ws::OkxAdapter`, `kraken::ws::KrakenAdapter`, `bitstamp::ws::BitstampAdapter`) implements the `ExchangeAdapter` trait, which defines:
+Each exchange adapter (`okx::ws::OkxAdapter`, `kraken::ws::KrakenAdapter`, `bitstamp::ws::BitstampAdapter`, `bitvavo::ws::BitvavoAdapter`) implements the `ExchangeAdapter` trait, which defines:
 
 - `instrument()`: the instrument symbol
 - `url()`: WebSocket URL for the region/exchange

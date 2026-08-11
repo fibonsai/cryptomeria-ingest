@@ -651,6 +651,8 @@ mod tests {
             },
             alias: None,
             fallback: HashMap::new(),
+            api_key: None,
+            api_secret: None,
         };
 
         let adapter = MockAdapter {
@@ -695,6 +697,8 @@ mod tests {
             },
             alias: None,
             fallback: HashMap::new(),
+            api_key: None,
+            api_secret: None,
         };
 
         let adapter = MockAdapter {

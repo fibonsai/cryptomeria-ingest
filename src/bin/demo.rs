@@ -24,6 +24,12 @@ struct Cli {
     /// (`fallback[exchange][alias]`). Defaults to the exchange-only rule.
     #[clap(long)]
     alias: Option<String>,
+    /// API key for exchanges requiring WS authentication (e.g. Bitvavo).
+    #[clap(long, env = "BITVAVO_API_KEY")]
+    api_key: Option<String>,
+    /// API secret for exchanges requiring WS authentication (e.g. Bitvavo).
+    #[clap(long, env = "BITVAVO_API_SECRET")]
+    api_secret: Option<String>,
     #[clap(long)]
     data_kind: Option<String>,
     #[clap(long)]
@@ -109,6 +115,8 @@ async fn main() {
                 silence_timeout_secs: cli.resilience.silence_timeout_secs,
             },
             fallback: HashMap::new(),
+            api_key: cli.api_key,
+            api_secret: cli.api_secret,
         }
     };
 

@@ -9,6 +9,7 @@ pub enum ExchangeValidator {
     Okx,
     Kraken,
     Bitstamp,
+    Bitvavo,
 }
 
 impl ExchangeValidator {
@@ -18,6 +19,7 @@ impl ExchangeValidator {
             ExchangeValidator::Okx => "okx",
             ExchangeValidator::Kraken => "kraken",
             ExchangeValidator::Bitstamp => "bitstamp",
+            ExchangeValidator::Bitvavo => "bitvavo",
         }
     }
 
@@ -34,6 +36,9 @@ impl ExchangeValidator {
             ExchangeValidator::Bitstamp => {
                 crate::bitstamp::validate_bitstamp(region, instrument).await
             }
+            ExchangeValidator::Bitvavo => {
+                crate::bitvavo::validate_bitvavo(region, instrument).await
+            }
         }
     }
 
@@ -43,6 +48,7 @@ impl ExchangeValidator {
             "okx" => Some(ExchangeValidator::Okx),
             "kraken" => Some(ExchangeValidator::Kraken),
             "bitstamp" => Some(ExchangeValidator::Bitstamp),
+            "bitvavo" => Some(ExchangeValidator::Bitvavo),
             _ => None,
         }
     }
@@ -256,6 +262,10 @@ mod tests {
             ExchangeValidator::from_exchange_name("bitstamp"),
             Some(ExchangeValidator::Bitstamp)
         );
+        assert_eq!(
+            ExchangeValidator::from_exchange_name("bitvavo"),
+            Some(ExchangeValidator::Bitvavo)
+        );
         assert_eq!(ExchangeValidator::from_exchange_name("unknown"), None);
     }
 
@@ -264,6 +274,7 @@ mod tests {
         assert_eq!(ExchangeValidator::Okx.exchange_name(), "okx");
         assert_eq!(ExchangeValidator::Kraken.exchange_name(), "kraken");
         assert_eq!(ExchangeValidator::Bitstamp.exchange_name(), "bitstamp");
+        assert_eq!(ExchangeValidator::Bitvavo.exchange_name(), "bitvavo");
     }
 
     #[test]

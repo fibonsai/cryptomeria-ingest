@@ -182,7 +182,7 @@ impl Default for ExchangeFallbackMapping {
 /// Complete configuration for a single `stream()` call.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DataSourceConfig {
-    /// Exchange identifier: "okx", "kraken", "bitstamp".
+    /// Exchange identifier: "okx", "kraken", "bitstamp", "bitvavo".
     pub exchange: String,
     /// Region: "global" or "europe" (affects WS/REST endpoints).
     pub region: String,
@@ -211,6 +211,14 @@ pub struct DataSourceConfig {
     /// exchange-only fallback shared by all instruments when no alias matches.
     #[serde(default)]
     pub fallback: HashMap<String, HashMap<String, ExchangeFallbackMapping>>,
+    /// Optional API key for exchanges that require WebSocket authentication
+    /// (e.g. Bitvavo). Ignored by exchanges that do not require credentials.
+    #[serde(default)]
+    pub api_key: Option<String>,
+    /// Optional API secret for exchanges that require WebSocket authentication
+    /// (e.g. Bitvavo). Ignored by exchanges that do not require credentials.
+    #[serde(default)]
+    pub api_secret: Option<String>,
 }
 
 impl DataSourceConfig {
@@ -219,8 +227,17 @@ impl DataSourceConfig {
         if self.exchange.trim().is_empty() {
             return Err(ConfigError::MissingExchange);
         }
-        if !matches!(self.exchange.as_str(), "okx" | "kraken" | "bitstamp") {
+        if !matches!(
+            self.exchange.as_str(),
+            "okx" | "kraken" | "bitstamp" | "bitvavo"
+        ) {
             return Err(ConfigError::UnknownExchange(self.exchange.clone()));
+        }
+        if self.exchange == "bitvavo"
+            && (self.api_key.as_deref().is_none_or(str::is_empty)
+                || self.api_secret.as_deref().is_none_or(str::is_empty))
+        {
+            return Err(ConfigError::MissingCredentials);
         }
         if self.region.trim().is_empty() {
             return Err(ConfigError::MissingRegion);
@@ -250,6 +267,8 @@ pub enum ConfigError {
     MissingInstrument,
     EmptyDataKind,
     MaxLevelWithoutLob,
+    /// Required for exchanges that need WebSocket authentication (e.g. Bitvavo).
+    MissingCredentials,
 }
 
 impl std::fmt::Display for ConfigError {
@@ -263,6 +282,9 @@ impl std::fmt::Display for ConfigError {
             ConfigError::EmptyDataKind => write!(f, "data_kind must include at least Lob or Trade"),
             ConfigError::MaxLevelWithoutLob => {
                 write!(f, "max_level requires data_kind to include Lob")
+            }
+            ConfigError::MissingCredentials => {
+                write!(f, "bitvavo requires api_key and api_secret")
             }
         }
     }
@@ -282,6 +304,8 @@ impl Default for DataSourceConfig {
             max_level_pct: 0.0,
             resilience: ResilienceConfig::default(),
             fallback: HashMap::new(),
+            api_key: None,
+            api_secret: None,
         }
     }
 }
@@ -499,6 +523,48 @@ mod tests {
     }
 
     #[test]
+    fn test_data_source_config_validate_bitvavo_missing_credentials() {
+        let cfg = DataSourceConfig {
+            exchange: "bitvavo".into(),
+            region: "global".into(),
+            instrument: "BTC-EUR".into(),
+            data_kind: DataKind::LOB,
+            ..Default::default()
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(matches!(err, ConfigError::MissingCredentials));
+    }
+
+    #[test]
+    fn test_data_source_config_validate_bitvavo_with_credentials() {
+        let cfg = DataSourceConfig {
+            exchange: "bitvavo".into(),
+            region: "global".into(),
+            instrument: "BTC-EUR".into(),
+            data_kind: DataKind::LOB,
+            api_key: Some("key".into()),
+            api_secret: Some("secret".into()),
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_data_source_config_validate_bitvavo_empty_credentials() {
+        let cfg = DataSourceConfig {
+            exchange: "bitvavo".into(),
+            region: "global".into(),
+            instrument: "BTC-EUR".into(),
+            data_kind: DataKind::LOB,
+            api_key: Some("".into()),
+            api_secret: Some("secret".into()),
+            ..Default::default()
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(matches!(err, ConfigError::MissingCredentials));
+    }
+
+    #[test]
     fn test_config_error_display() {
         assert_eq!(
             ConfigError::MissingExchange.to_string(),
@@ -524,6 +590,10 @@ mod tests {
         assert_eq!(
             ConfigError::MaxLevelWithoutLob.to_string(),
             "max_level requires data_kind to include Lob"
+        );
+        assert_eq!(
+            ConfigError::MissingCredentials.to_string(),
+            "bitvavo requires api_key and api_secret"
         );
     }
 }
