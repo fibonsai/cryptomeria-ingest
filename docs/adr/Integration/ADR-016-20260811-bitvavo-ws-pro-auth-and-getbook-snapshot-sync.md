@@ -1,7 +1,7 @@
 # ADR-016: Bitvavo WS Market Data Pro — HMAC Auth and getBook Snapshot Sync
 
 ## Status
-Proposed (2026-08-11)
+Accepted (2026-08-11)
 
 ## Category
 Integration
