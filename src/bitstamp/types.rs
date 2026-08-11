@@ -139,9 +139,9 @@ pub struct LobLevel {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct OrderBookData {
     #[serde(default)]
-    pub bids: Vec<[String; 2]>,
+    pub bids: Vec<Vec<String>>,
     #[serde(default)]
-    pub asks: Vec<[String; 2]>,
+    pub asks: Vec<Vec<String>>,
     #[serde(default)]
     pub timestamp: String,
     #[serde(default)]
@@ -705,5 +705,26 @@ mod tests {
         assert_eq!(msg.event.as_deref(), Some("error"));
         let summary = msg.summary();
         assert_eq!(summary, "error");
+    }
+
+    #[test]
+    fn test_orderbook_data_deserializes_3_element_arrays() {
+        // Bitstamp WebSocket diff_order_book returns levels as 3-element arrays
+        // [price, amount, order_id], unlike REST order_book which returns 2-element.
+        let json = r#"{
+            "bids": [["100.0", "1.5", "12345"]],
+            "asks": [["101.0", "0.5", "67890"]],
+            "timestamp": "1705314600",
+            "microtimestamp": "1705314600123456"
+        }"#;
+        let ob: OrderBookData = serde_json::from_str(json).unwrap();
+        assert_eq!(ob.bids.len(), 1);
+        assert_eq!(ob.asks.len(), 1);
+        assert_eq!(ob.bids[0].len(), 3);
+        assert_eq!(ob.asks[0].len(), 3);
+        assert_eq!(ob.bids[0][0], "100.0");
+        assert_eq!(ob.bids[0][2], "12345");
+        assert_eq!(ob.asks[0][0], "101.0");
+        assert_eq!(ob.asks[0][2], "67890");
     }
 }
