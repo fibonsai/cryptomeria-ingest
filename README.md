@@ -698,6 +698,9 @@ Each exchange adapter (`okx::ws::OkxAdapter`, `kraken::ws::KrakenAdapter`, `bits
 - `instrument()`: the instrument symbol
 - `url()`: WebSocket URL for the region/exchange
 - `subscribe_msgs()`: messages to send on connection, as `(channel_name, json)` pairs
+- `auth_msgs()`: optional authentication messages to send before subscribe messages (e.g. Bitvavo). Default: `None`
+- `is_auth_confirmed(&self, msg: &Self::Message) -> bool`: whether a parsed message confirms successful authentication. Default: `false`
+- `auth_confirmation_timeout() -> Option<Duration>`: timeout for waiting for auth confirmation. Default: `None`
 - `parse_message(&self, text: &str) -> Result<Self::Message, String>`: parse raw WebSocket text
 - `handle_message(&mut self, msg: &Self::Message) -> Option<MarketDataItem>`: process a parsed message, update internal state, return an item to emit
 - `handle_heartbeat(&self, msg: &Self::Message) -> bool`: whether to respond to this message as a heartbeat
@@ -708,6 +711,7 @@ Each exchange adapter (`okx::ws::OkxAdapter`, `kraken::ws::KrakenAdapter`, `bits
 The shared logic that handles:
 
 - Connection with exponential backoff and jitter
+- Authentication (if `auth_msgs()` returns `Some`): send auth messages, wait for `is_auth_confirmed()` within `auth_confirmation_timeout()`, then proceed to subscribe
 - Sending subscription messages
 - Reading WebSocket messages
 - Dispatching to the adapter's `handle_message`
@@ -723,8 +727,7 @@ The shared logic that handles:
 2. For each active channel, the exchange's `build_channel_streams` factory constructs a
    single-channel adapter and launches a dedicated `wsloop::run_exchange_stream` task — one
    WebSocket connection per channel, each with its own independent reconnect/backoff loop.
-3. Each task connects, subscribes (logging the channel name at `Info` on success and
-   `Error` on failure), and begins reading messages.
+3. Each task connects, optionally authenticates (if `auth_msgs()` returns `Some`), subscribes (logging the channel name at `Info` on success and `Error` on failure), and begins reading messages.
 4. Each parsed message is passed to `adapter.handle_message`, which returns a `MarketDataItem`.
 5. Items are sent via a bounded `mpsc::Sender` (capacity 1024) to the receiver half.
 6. The per-channel streams are merged into one via `wsloop::merge_stream_handles`
