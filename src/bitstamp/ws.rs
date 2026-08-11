@@ -1,4 +1,4 @@
-use crate::bitstamp::lob::OrderBook;
+use crate::bitstamp::lob::{BITSTAMP_LOB_DISABLED, OrderBook};
 use crate::bitstamp::types::{BitstampWsMessage, MessageType, OrderBookData, TradeData};
 use crate::config::DataKind;
 use crate::items::{LobItem, MarketDataItem, TradeItem};
@@ -65,9 +65,21 @@ impl BitstampAdapter {
     }
 
     fn emit_lob(&mut self, ts: u64) -> Option<MarketDataItem> {
-        let lob = self
-            .book
-            .to_lob_item(ts, &self.exchange, self.max_level, self.max_level_pct)?;
+        // While Bitstamp LOB is disabled, emit an empty object (empty bids/asks)
+        // rather than the buggy real order-book data. The order-book logic in
+        // `lob.rs` is still exercised by `process_msg` below but its result is
+        // discarded; set `BITSTAMP_LOB_DISABLED = false` to re-enable real data.
+        let lob = if BITSTAMP_LOB_DISABLED {
+            LobItem {
+                ts,
+                exchange: self.exchange.clone(),
+                bids: Vec::new(),
+                asks: Vec::new(),
+            }
+        } else {
+            self.book
+                .to_lob_item(ts, &self.exchange, self.max_level, self.max_level_pct)?
+        };
 
         // Check for duplicate (same bids and asks as previous)
         if let Some(prev) = &self.prev_lob
@@ -86,7 +98,22 @@ impl BitstampAdapter {
     /// Fetch the full order book snapshot via REST for initial sync and reconnect recovery.
     ///
     /// Returns a Vec of MarketDataItem representing the LOB snapshot (as a single LobItem).
+    ///
+    /// While Bitstamp LOB is disabled, this returns an empty LOB object without making
+    /// the REST call (the snapshot would otherwise be discarded by `emit_lob` anyway).
     async fn fetch_snapshot(&self) -> Result<Vec<MarketDataItem>, String> {
+        if BITSTAMP_LOB_DISABLED {
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            return Ok(vec![MarketDataItem::Lob(LobItem {
+                ts,
+                exchange: self.exchange.clone(),
+                bids: Vec::new(),
+                asks: Vec::new(),
+            })]);
+        }
         let depth = self.max_level.unwrap_or(400);
         let url = format!(
             "{}/order_book/{}?group={}",
@@ -415,5 +442,50 @@ mod tests {
             BitstampWsMessage::from_json(r#"{"channel":"nonsense_btcusd","data":{"x":1}}"#)
                 .unwrap();
         assert!(a.handle_message(&msg).is_none());
+    }
+
+    // --- Bitstamp LOB is temporarily disabled (bug workaround) ---
+    // The LOB stream must return an *empty object* (a LobItem with empty bids/asks)
+    // rather than the buggy real data. All order-book parsing logic is retained but
+    // not emitted. See README warning and the disabling issue.
+
+    #[test]
+    fn test_handle_message_lob_disabled_returns_empty_lob() {
+        let mut a = adapter(); // data_kind = LOB | TRADE
+        let msg: BitstampWsMessage = BitstampWsMessage::from_json(
+            r#"{"event":"snapshot","channel":"diff_order_book_btcusd","data":{"bids":[["100.0","1.5"]],"asks":[["101.0","2.0"]]}}"#,
+        )
+        .unwrap();
+        let item = a
+            .handle_message(&msg)
+            .expect("disabled LOB should still emit an empty lob");
+        match item {
+            MarketDataItem::Lob(lob) => {
+                assert_eq!(lob.exchange, "bitstamp");
+                assert!(lob.bids.is_empty(), "disabled LOB must return empty bids");
+                assert!(lob.asks.is_empty(), "disabled LOB must return empty asks");
+            }
+            _ => panic!("expected Lob item"),
+        }
+    }
+
+    #[test]
+    fn test_handle_message_lob_disabled_dedup_suppresses_repeated_empty() {
+        let mut a = adapter();
+        let msg1: BitstampWsMessage = BitstampWsMessage::from_json(
+            r#"{"event":"snapshot","channel":"diff_order_book_btcusd","data":{"bids":[["100.0","1.5"]],"asks":[["101.0","2.0"]]}}"#,
+        )
+        .unwrap();
+        let msg2: BitstampWsMessage = BitstampWsMessage::from_json(
+            r#"{"event":"snapshot","channel":"diff_order_book_btcusd","data":{"bids":[["99.0","1.0"],["98.0","2.0"]],"asks":[["102.0","3.0"]]}}"#,
+        )
+        .unwrap();
+        // The first (snapshot) message emits the empty lob object.
+        let first = a.handle_message(&msg1);
+        assert!(first.is_some(), "first lob must be emitted");
+        // A second, *different* real snapshot would normally produce a distinct lob
+        // and be emitted; with LOB disabled it is always empty, so it is deduplicated.
+        let second = a.handle_message(&msg2);
+        assert!(second.is_none(), "repeated empty lob must be deduplicated");
     }
 }

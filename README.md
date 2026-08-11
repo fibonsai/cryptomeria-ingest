@@ -19,6 +19,18 @@ Connects to WebSocket feeds (OKX, Kraken, Bitstamp, Bitvavo) and returns a strea
 - ✅ **Async/await**: Built on Tokio + Tokio-Tungstenite
 - ✅ **Zero-cost abstractions**: No heap allocations in hot paths where possible
 
+> **Warning — Bitstamp LOB is disabled (known bug)**
+> The Bitstamp **LOB (order-book)** stream is currently disabled because of a known bug that
+> produces incorrect order-book state. While disabled, requesting `DataKind::LOB` (or `Lob|Trade`)
+> on Bitstamp returns an **empty object** — a `LobItem` with empty `bids` and `asks` — instead of real
+> levels. The full LOB implementation is **retained** (parsing, the per-order book model, and all
+> unit tests are kept intact) and will be **re-enabled** once the bug is fixed by flipping a single
+> flag.
+>
+> **Recommendation:** until the fix lands, **do not use Bitstamp for LOB data.** Use Bitstamp for
+> trades only (set `data_kind` to `Trade`), or prefer OKX, Kraken, or Bitvavo for LOB. The bug is
+> tracked in [#65 — Disable Bitstamp LOB support (bug workaround)](https://github.com/fibonsai/cryptomeria-ingest/issues/65).
+
 ## Installation
 
 Add this to your `Cargo.toml`:
@@ -211,6 +223,17 @@ let config = DataSourceConfig {
     ..Default::default()
 };
 ```
+
+> *Note:* Bitstamp **LOB is disabled** (see the warning above). For trades-only on Bitstamp:
+> ```rust
+> let config = DataSourceConfig {
+>     exchange: "bitstamp".into(),
+>     region: "global".into(),
+>     instrument: "BTC/USD".into(),
+>     data_kind: DataKind::TRADE,
+>     ..Default::default()
+> };
+> ```
 
 ### 4. Subscribe to both LOB and trades (Bitvavo, requires credentials)
 
