@@ -504,12 +504,12 @@ mod tests {
         let mut book = OrderBook::new();
         let ob = OrderBookData {
             bids: vec![
-                ["100.0".into(), "1.5".into()],
-                ["99.0".into(), "2.0".into()],
+                vec!["100.0".into(), "1.5".into()],
+                vec!["99.0".into(), "2.0".into()],
             ],
             asks: vec![
-                ["101.0".into(), "0.5".into()],
-                ["102.0".into(), "1.0".into()],
+                vec!["101.0".into(), "0.5".into()],
+                vec!["102.0".into(), "1.0".into()],
             ],
             timestamp: "0".to_string(),
             microtimestamp: "0".to_string(),
@@ -523,8 +523,8 @@ mod tests {
     fn test_spread_calculation() {
         let mut book = OrderBook::new();
         let ob = OrderBookData {
-            bids: vec![["100.0".into(), "1.0".into()]],
-            asks: vec![["101.0".into(), "1.0".into()]],
+            bids: vec![vec!["100.0".into(), "1.0".into()]],
+            asks: vec![vec!["101.0".into(), "1.0".into()]],
             timestamp: "0".to_string(),
             microtimestamp: "0".to_string(),
         };
@@ -539,10 +539,10 @@ mod tests {
         let mut book = OrderBook::new();
         let ob = OrderBookData {
             bids: vec![
-                ["100.0".into(), "1.0".into()],
-                ["99.0".into(), "2.0".into()],
+                vec!["100.0".into(), "1.0".into()],
+                vec!["99.0".into(), "2.0".into()],
             ],
-            asks: vec![["101.0".into(), "3.0".into()]],
+            asks: vec![vec!["101.0".into(), "3.0".into()]],
             timestamp: "0".to_string(),
             microtimestamp: "0".to_string(),
         };
@@ -557,10 +557,10 @@ mod tests {
         let mut book = OrderBook::new();
         let ob = OrderBookData {
             bids: vec![
-                ["100.0".into(), "1.0".into()],
-                ["99.5".into(), "2.0".into()],
-                ["99.0".into(), "3.0".into()],
-                ["98.0".into(), "4.0".into()],
+                vec!["100.0".into(), "1.0".into()],
+                vec!["99.5".into(), "2.0".into()],
+                vec!["99.0".into(), "3.0".into()],
+                vec!["98.0".into(), "4.0".into()],
             ],
             asks: vec![],
             timestamp: "0".to_string(),
@@ -579,7 +579,7 @@ mod tests {
         let mut book = OrderBook::new();
         book.apply_orderbook(&OrderBookData {
             bids: vec![],
-            asks: vec![["101.0".into(), "1.0".into()]],
+            asks: vec![vec!["101.0".into(), "1.0".into()]],
             timestamp: "0".to_string(),
             microtimestamp: "0".to_string(),
         });
@@ -591,7 +591,7 @@ mod tests {
     fn test_to_lob_item_returns_none_when_asks_empty() {
         let mut book = OrderBook::new();
         book.apply_orderbook(&OrderBookData {
-            bids: vec![["100.0".into(), "1.0".into()]],
+            bids: vec![vec!["100.0".into(), "1.0".into()]],
             asks: vec![],
             timestamp: "0".to_string(),
             microtimestamp: "0".to_string(),
@@ -605,15 +605,15 @@ mod tests {
         let mut book = OrderBook::new();
         book.apply_orderbook(&OrderBookData {
             bids: vec![
-                ["100.0".into(), "1.0".into()],
-                ["99.0".into(), "2.0".into()],
-                ["98.0".into(), "3.0".into()],
-                ["97.0".into(), "4.0".into()],
+                vec!["100.0".into(), "1.0".into()],
+                vec!["99.0".into(), "2.0".into()],
+                vec!["98.0".into(), "3.0".into()],
+                vec!["97.0".into(), "4.0".into()],
             ],
             asks: vec![
-                ["101.0".into(), "1.0".into()],
-                ["102.0".into(), "2.0".into()],
-                ["103.0".into(), "3.0".into()],
+                vec!["101.0".into(), "1.0".into()],
+                vec!["102.0".into(), "2.0".into()],
+                vec!["103.0".into(), "3.0".into()],
             ],
             timestamp: "0".to_string(),
             microtimestamp: "0".to_string(),
@@ -627,15 +627,15 @@ mod tests {
     fn test_to_lob_item_sorts_bids_with_best_bid_last() {
         let mut book = OrderBook::new();
         book.apply_orderbook(&OrderBookData {
-            bids: vec![["100.0".into(), "1.0".into()]],
-            asks: vec![["101.0".into(), "1.0".into()]],
+            bids: vec![vec!["100.0".into(), "1.0".into()]],
+            asks: vec![vec!["101.0".into(), "1.0".into()]],
             timestamp: "0".to_string(),
             microtimestamp: "0".to_string(),
         });
         // Add more bids to test sorting
         book.apply_orderbook(&OrderBookData {
-            bids: vec![["100.0".into(), "1.0".into()]],
-            asks: vec![["101.0".into(), "1.0".into()]],
+            bids: vec![vec!["100.0".into(), "1.0".into()]],
+            asks: vec![vec!["101.0".into(), "1.0".into()]],
             timestamp: "0".to_string(),
             microtimestamp: "0".to_string(),
         });
@@ -720,8 +720,8 @@ mod tests {
     fn test_to_lob_item_filters_by_max_level_pct() {
         let mut book = OrderBook::new();
         book.apply_orderbook(&OrderBookData {
-            bids: vec![["100.0".into(), "1.0".into()]],
-            asks: vec![["101.0".into(), "1.0".into()]],
+            bids: vec![vec!["100.0".into(), "1.0".into()]],
+            asks: vec![vec!["101.0".into(), "1.0".into()]],
             timestamp: "0".to_string(),
             microtimestamp: "0".to_string(),
         });
@@ -758,14 +758,14 @@ mod tests {
         let mut book = OrderBook::new();
         book.apply_orderbook(&OrderBookData {
             bids: vec![
-                ["100.0".into(), "1.0".into()],
-                ["99.0".into(), "2.0".into()],
-                ["98.0".into(), "3.0".into()],
+                vec!["100.0".into(), "1.0".into()],
+                vec!["99.0".into(), "2.0".into()],
+                vec!["98.0".into(), "3.0".into()],
             ],
             asks: vec![
-                ["101.0".into(), "1.0".into()],
-                ["102.0".into(), "2.0".into()],
-                ["103.0".into(), "3.0".into()],
+                vec!["101.0".into(), "1.0".into()],
+                vec!["102.0".into(), "2.0".into()],
+                vec!["103.0".into(), "3.0".into()],
             ],
             timestamp: "0".to_string(),
             microtimestamp: "0".to_string(),
@@ -780,8 +780,8 @@ mod tests {
     fn test_to_lob_item_pct_100_keeps_all_levels() {
         let mut book = OrderBook::new();
         book.apply_orderbook(&OrderBookData {
-            bids: vec![["100.0".into(), "1.0".into()]],
-            asks: vec![["101.0".into(), "1.0".into()]],
+            bids: vec![vec!["100.0".into(), "1.0".into()]],
+            asks: vec![vec!["101.0".into(), "1.0".into()]],
             timestamp: "0".to_string(),
             microtimestamp: "0".to_string(),
         });
@@ -795,10 +795,10 @@ mod tests {
         let mut book = OrderBook::new();
         book.apply_orderbook(&OrderBookData {
             bids: vec![
-                ["100.0".into(), "1.0".into()],
-                ["50.0".into(), "2.0".into()],
+                vec!["100.0".into(), "1.0".into()],
+                vec!["50.0".into(), "2.0".into()],
             ],
-            asks: vec![["101.0".into(), "1.0".into()]],
+            asks: vec![vec!["101.0".into(), "1.0".into()]],
             timestamp: "0".to_string(),
             microtimestamp: "0".to_string(),
         });
