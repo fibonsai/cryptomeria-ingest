@@ -6,6 +6,7 @@ use crate::wsloop::ExchangeAdapter;
 use hmac::{Hmac, Mac};
 use log::{info, warn};
 use sha2::Sha256;
+use std::time::Duration;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -145,11 +146,7 @@ impl ExchangeAdapter for BitvavoAdapter {
     }
 
     fn subscribe_msgs(&self) -> Vec<(String, String)> {
-        let key = self.api_key.as_deref().unwrap_or("");
-        let secret = self.api_secret.as_deref().unwrap_or("");
-        let auth_msg = build_auth_msg(key, secret);
-
-        let mut msgs = vec![("auth".to_string(), auth_msg)];
+        let mut msgs = vec![];
 
         if self.data_kind.contains(DataKind::LOB) {
             msgs.push((
@@ -171,6 +168,20 @@ impl ExchangeAdapter for BitvavoAdapter {
         }
 
         msgs
+    }
+
+    fn auth_msgs(&self) -> Option<Vec<(String, String)>> {
+        let key = self.api_key.as_deref()?;
+        let secret = self.api_secret.as_deref()?;
+        Some(vec![("auth".to_string(), build_auth_msg(key, secret))])
+    }
+
+    fn is_auth_confirmed(&self, msg: &Self::Message) -> bool {
+        msg.is_auth_confirmed()
+    }
+
+    fn auth_confirmation_timeout(&self) -> Option<Duration> {
+        Some(Duration::from_secs(10))
     }
 
     fn parse_message(&self, text: &str) -> Result<Self::Message, String> {
@@ -233,8 +244,23 @@ impl ExchangeAdapter for BitvavoAdapter {
                 }
             }
             MessageType::Auth | MessageType::Event | MessageType::Unknown => {
-                if matches!(msg.message_type(), MessageType::Event) {
-                    info!("[bitvavo] event: event={:?}", msg.event);
+                if msg.message_type() == MessageType::Auth {
+                    if msg.is_auth_confirmed() {
+                        info!(
+                            "[bitvavo] auth confirmed: exchange=bitvavo instrument={} channel=auth",
+                            self.instrument
+                        );
+                    } else if msg.success == Some(false) {
+                        warn!(
+                            "[bitvavo] auth failed: exchange=bitvavo instrument={} channel=auth",
+                            self.instrument
+                        );
+                    }
+                } else if matches!(msg.message_type(), MessageType::Event) {
+                    info!(
+                        "[bitvavo] event: exchange=bitvavo instrument={} event={:?}",
+                        self.instrument, msg.event
+                    );
                 }
                 None
             }
@@ -319,39 +345,121 @@ mod tests {
         assert_eq!(v["market"], "BTC-EUR");
         assert_eq!(v["depth"], 1000);
     }
-
     #[test]
-    fn test_subscribe_msgs_lob_includes_auth_book_getbook() {
+    fn test_subscribe_msgs_lob_returns_book_and_getbook() {
         let a = adapter_with_kind(DataKind::LOB);
         let msgs = a.subscribe_msgs();
-        assert_eq!(msgs.len(), 3);
-        assert_eq!(msgs[0].0, "auth");
-        assert_eq!(msgs[1].0, "book");
-        assert_eq!(msgs[2].0, "getbook");
-        assert!(msgs[0].1.contains("\"action\":\"authenticate\""));
-        assert!(msgs[1].1.contains("\"book\""));
-        assert!(msgs[2].1.contains("\"getBook\""));
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].0, "book");
+        assert_eq!(msgs[1].0, "getbook");
+        assert!(msgs[0].1.contains("\"book\""));
+        assert!(msgs[1].1.contains("\"getBook\""));
     }
 
     #[test]
-    fn test_subscribe_msgs_trade_includes_auth_and_trades_only() {
+    fn test_auth_msgs_lob_returns_auth() {
+        let a = adapter_with_kind(DataKind::LOB);
+        let auth = a.auth_msgs();
+        assert!(auth.is_some());
+        let msgs = auth.unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].0, "auth");
+        assert!(msgs[0].1.contains("\"action\":\"authenticate\""));
+    }
+
+    #[test]
+    fn test_subscribe_msgs_trade_returns_trades_only() {
         let a = adapter_with_kind(DataKind::TRADE);
         let msgs = a.subscribe_msgs();
-        assert_eq!(msgs.len(), 2);
-        assert_eq!(msgs[0].0, "auth");
-        assert_eq!(msgs[1].0, "trades");
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].0, "trades");
     }
 
     #[test]
-    fn test_subscribe_msgs_both_includes_auth_book_getbook_trades() {
+    fn test_auth_msgs_trade_returns_auth() {
+        let a = adapter_with_kind(DataKind::TRADE);
+        let auth = a.auth_msgs();
+        assert!(auth.is_some());
+        let msgs = auth.unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].0, "auth");
+    }
+
+    #[test]
+    fn test_subscribe_msgs_both_returns_book_getbook_trades() {
         let a = adapter();
         let msgs = a.subscribe_msgs();
-        assert_eq!(msgs.len(), 4);
+        assert_eq!(msgs.len(), 3);
         let names: Vec<String> = msgs.iter().map(|(c, _)| c.clone()).collect();
-        assert!(names.contains(&"auth".to_string()));
         assert!(names.contains(&"book".to_string()));
         assert!(names.contains(&"getbook".to_string()));
         assert!(names.contains(&"trades".to_string()));
+    }
+
+    #[test]
+    fn test_auth_msgs_both_returns_auth() {
+        let a = adapter();
+        let auth = a.auth_msgs();
+        assert!(auth.is_some());
+        let msgs = auth.unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].0, "auth");
+    }
+
+    #[test]
+    fn test_auth_msgs_none_when_no_credentials() {
+        let a = BitvavoAdapter::new(
+            "BTC-EUR".into(),
+            "global".into(),
+            None,
+            None,
+            0.0,
+            None,
+            DataKind::LOB,
+        );
+        assert!(a.auth_msgs().is_none());
+    }
+
+    #[test]
+    fn test_is_auth_confirmed_true_for_success_message() {
+        let a = adapter();
+        let msg: BitvavoWsMessage =
+            BitvavoWsMessage::from_json(r#"{"action":"authenticate","success":true}"#).unwrap();
+        assert!(a.is_auth_confirmed(&msg));
+    }
+
+    #[test]
+    fn test_is_auth_confirmed_false_for_success_false() {
+        let a = adapter();
+        let msg: BitvavoWsMessage =
+            BitvavoWsMessage::from_json(r#"{"action":"authenticate","success":false}"#).unwrap();
+        assert!(!a.is_auth_confirmed(&msg));
+    }
+
+    #[test]
+    fn test_is_auth_confirmed_false_for_non_auth_message() {
+        let a = adapter();
+        let msg: BitvavoWsMessage = BitvavoWsMessage::from_json(
+            r#"{"event":"trade","id":"t1","amount":"1.0","price":"100.0","timestamp":123,"market":"BTC-EUR","side":"buy"}"#,
+        )
+        .unwrap();
+        assert!(!a.is_auth_confirmed(&msg));
+    }
+
+    #[test]
+    fn test_is_auth_confirmed_false_for_auth_request_without_success() {
+        let a = adapter();
+        let msg: BitvavoWsMessage = BitvavoWsMessage::from_json(
+            r#"{"action":"authenticate","key":"k","signature":"s","timestamp":1}"#,
+        )
+        .unwrap();
+        assert!(!a.is_auth_confirmed(&msg));
+    }
+
+    #[test]
+    fn test_auth_confirmation_timeout() {
+        let a = adapter();
+        assert_eq!(a.auth_confirmation_timeout(), Some(Duration::from_secs(10)));
     }
 
     #[test]

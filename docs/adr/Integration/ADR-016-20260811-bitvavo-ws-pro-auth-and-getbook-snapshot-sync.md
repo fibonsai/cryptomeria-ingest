@@ -3,6 +3,11 @@
 ## Status
 Accepted (2026-08-11)
 
+> **Note:** Decision (b) — auth-first ordering via `subscribe_msgs()` — has been
+> refined by [ADR-019](ADR-019-20260811-two-phase-auth-and-subscribe-in-wsloop.md).
+> Auth messages are now split into a separate `auth_msgs()` trait method, and the
+> wsloop waits for auth confirmation before sending subscribe messages.
+
 ## Category
 Integration
 

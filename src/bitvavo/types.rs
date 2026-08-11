@@ -118,6 +118,10 @@ pub struct BitvavoWsMessage {
 
     #[serde(default)]
     pub subscriptions: Option<serde_json::Value>,
+
+    /// `success` field in auth and subscription responses.
+    #[serde(default)]
+    pub success: Option<bool>,
 }
 
 impl BitvavoWsMessage {
@@ -134,6 +138,14 @@ impl BitvavoWsMessage {
                 None => MessageType::Unknown,
             },
         }
+    }
+
+    /// Returns `true` when this message confirms successful authentication.
+    ///
+    /// The Bitvavo WS Pro API responds to an `authenticate` request with a
+    /// message containing `action == "authenticate"` and `success == true`.
+    pub fn is_auth_confirmed(&self) -> bool {
+        self.action.as_deref() == Some("authenticate") && self.success == Some(true)
     }
 
     /// Extract a `BookSnapshot` from a `getBook` response.

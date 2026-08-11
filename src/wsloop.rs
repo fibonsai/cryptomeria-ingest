@@ -140,6 +140,12 @@ where
 /// The loop handles connection, subscription, reconnection, backoff, and heartbeat.
 /// The adapter provides exchange-specific message parsing, subscription messages,
 /// and optional reconnect snapshot fetching.
+///
+/// For exchanges that require pre-subscription authentication (e.g. Bitvavo),
+/// the adapter can override `auth_msgs()`, `is_auth_confirmed()`, and
+/// `auth_confirmation_timeout()` so the wsloop waits for auth confirmation
+/// before sending subscribe messages. See ADR-019 for the two-phase design.
+///
 pub trait ExchangeAdapter: Send + 'static {
     /// The raw WebSocket message type after parsing.
     type Message: Send;
@@ -160,6 +166,37 @@ pub trait ExchangeAdapter: Send + 'static {
     /// channel, so this is typically a single-element vector. The channel name
     /// is used for structured logging.
     fn subscribe_msgs(&self) -> Vec<(String, String)>;
+
+    /// Optional authentication messages to send before subscribe messages.
+    ///
+    /// Some exchanges (e.g. Bitvavo) require WS authentication before
+    /// subscriptions are accepted. When this returns `Some(msgs)`, the wsloop
+    /// sends them first, waits for `is_auth_confirmed` to return `true` (or
+    /// times out), and only then sends `subscribe_msgs`. Returns `None` (the
+    /// default) for exchanges that don't require pre-subscription auth.
+    fn auth_msgs(&self) -> Option<Vec<(String, String)>> {
+        None
+    }
+
+    /// Whether a parsed message constitutes auth confirmation from the exchange.
+    ///
+    /// The wsloop calls this for every incoming message while in the auth-wait
+    /// state. Return `true` when the exchange has acknowledged authentication.
+    /// The default returns `false` (used by exchanges that don't require auth).
+    fn is_auth_confirmed(&self, msg: &Self::Message) -> bool {
+        let _ = msg;
+        false
+    }
+
+    /// Timeout for waiting for auth confirmation, in seconds.
+    ///
+    /// When `Some(secs)`, the wsloop waits up to that duration for auth to be
+    /// confirmed before treating it as a failure and reconnecting. When
+    /// `None` (the default), auth is not required and subscribe messages are
+    /// sent immediately after `subscribe_msgs`.
+    fn auth_confirmation_timeout(&self) -> Option<Duration> {
+        None
+    }
 
     /// Parse a raw WebSocket text frame into `Self::Message`.
     fn parse_message(&self, text: &str) -> Result<Self::Message, String>;
@@ -253,6 +290,155 @@ where
 
             // Split into sender and receiver.
             let (mut write, mut read) = ws_stream.split();
+
+            // Send authentication messages first (if the adapter requires auth).
+            // Some exchanges (e.g. Bitvavo) require WS auth to be confirmed before
+            // subscriptions are accepted. We send auth messages, wait for confirmation,
+            // then proceed to subscribe. See `ExchangeAdapter::auth_msgs`.
+            if let Some(auth_messages) = adapter.auth_msgs() {
+                let auth_timeout = adapter.auth_confirmation_timeout().expect(
+                    "auth_msgs() returned Some but auth_confirmation_timeout() returned None",
+                );
+
+                // Send each auth message.
+                for (channel, msg) in auth_messages {
+                    match write.send(Message::Text(msg)).await {
+                        Ok(()) => {
+                            info!(
+                                "[WS authenticating] exchange={exchange} instrument={instrument} channel={channel}"
+                            );
+                        }
+                        Err(e) => {
+                            error!(
+                                "[WS auth send failed] exchange={exchange} instrument={instrument} channel={channel} error={e}"
+                            );
+                            attempt += 1;
+                            if let Some(max) = max_attempts
+                                && attempt >= max
+                            {
+                                error!(
+                                    "[WS max reconnects exceeded] exchange={exchange} instrument={instrument} channel=auth attempt={attempt} max_attempts={max_attempts:?}"
+                                );
+                                let _ = tx
+                                    .send(Err(IngestError::MaxReconnectsExceeded(attempt as u32)))
+                                    .await;
+                                return Err(IngestError::MaxReconnectsExceeded(attempt as u32));
+                            }
+                            let delay = backoff_delay(attempt - 1, &resilience);
+                            sleep(delay).await;
+                            continue 'outer;
+                        }
+                    }
+                }
+
+                // Wait for auth confirmation from the exchange.
+                let auth_timeout_sleep = tokio::time::sleep(auth_timeout);
+                tokio::pin!(auth_timeout_sleep);
+
+                let mut auth_confirmed = false;
+
+                'auth_wait: loop {
+                    tokio::select! {
+                        biased;
+                        msg = read.next() => {
+                            match msg {
+                                Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) => {
+                                    match adapter.parse_message(&text) {
+                                        Ok(parsed) => {
+                                            // Heartbeat handling during auth-wait.
+                                            if adapter.handle_heartbeat(&parsed) {
+                                                // tungstenite handles ws-level pings/pongs automatically.
+                                            }
+                                            // Check for auth confirmation.
+                                            if adapter.is_auth_confirmed(&parsed) {
+                                                info!(
+                                                    "[WS auth confirmed] exchange={exchange} instrument={instrument} channel=auth"
+                                                );
+                                                auth_confirmed = true;
+                                                break 'auth_wait;
+                                            }
+                                            // Process any market data items (unexpected during auth-wait).
+                                            if let Some(item) = adapter.handle_message(&parsed)
+                                                && tx.send(Ok(item)).await.is_err()
+                                            {
+                                                break 'auth_wait;
+                                            }
+                                        }
+                                        Err(e) => {
+                                            warn!("[Failed to parse WS message during auth] exchange={exchange} instrument={instrument} text={text} error={e}");
+                                        }
+                                    }
+                                }
+                                Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(_))) => {
+                                    debug!("[Unexpected binary message during auth] exchange={exchange} instrument={instrument} channel=auth");
+                                }
+                                Some(Ok(tokio_tungstenite::tungstenite::Message::Frame(_))) => {
+                                    debug!("[Unexpected raw frame during auth] exchange={exchange} instrument={instrument} channel=auth");
+                                }
+                                Some(Ok(tokio_tungstenite::tungstenite::Message::Ping(_))) => {
+                                    // tungstenite handles ping/pong automatically.
+                                }
+                                Some(Ok(tokio_tungstenite::tungstenite::Message::Pong(_))) => {
+                                    // pong
+                                }
+                                Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))) => {
+                                    warn!(
+                                        "[WS received close frame during auth] exchange={exchange} instrument={instrument} channel=auth"
+                                    );
+                                    break 'auth_wait;
+                                }
+                                Some(Err(e)) => {
+                                    error!(
+                                        "[WS read error during auth] exchange={exchange} instrument={instrument} error={e}"
+                                    );
+                                    break 'auth_wait;
+                                }
+                                None => {
+                                    info!(
+                                        "[WS stream ended during auth] exchange={exchange} instrument={instrument} channel=auth"
+                                    );
+                                    break 'auth_wait;
+                                }
+                            }
+                        }
+                        // Check if the sender channel is closed (receiver dropped).
+                        _ = tx.closed() => {
+                            info!("[Receiver dropped during auth, shutting down] exchange={exchange} instrument={instrument} channel=auth");
+                            break 'auth_wait;
+                        }
+                        // Auth confirmation timeout.
+                        _ = &mut auth_timeout_sleep => {
+                            warn!(
+                                "[WS auth timeout] exchange={exchange} instrument={instrument} channel=auth timeout_secs={}",
+                                auth_timeout.as_secs()
+                            );
+                            break 'auth_wait;
+                        }
+                    }
+                }
+
+                if !auth_confirmed {
+                    attempt += 1;
+                    if let Some(max) = max_attempts
+                        && attempt >= max
+                    {
+                        error!(
+                            "[WS max reconnects exceeded] exchange={exchange} instrument={instrument} channel=auth attempt={attempt} max_attempts={max_attempts:?}"
+                        );
+                        let _ = tx
+                            .send(Err(IngestError::MaxReconnectsExceeded(attempt as u32)))
+                            .await;
+                        return Err(IngestError::MaxReconnectsExceeded(attempt as u32));
+                    }
+                    let delay = backoff_delay(attempt - 1, &resilience);
+                    warn!(
+                        "[WS reconnecting after auth failure] exchange={exchange} instrument={instrument} channel=auth attempt={attempt} delay_ms={}",
+                        delay.as_millis()
+                    );
+                    sleep(delay).await;
+                    continue 'outer;
+                }
+            }
 
             // Send subscription messages (channel_names pre-computed above).
             for (channel, msg) in subscribe_channels {
@@ -719,5 +905,33 @@ mod tests {
             "expected MaxReconnectsExceeded(1) through the channel, got: {:?}",
             item
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Subtask 1 (cont.): Default auth-related trait methods
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_default_auth_msgs_is_none() {
+        let adapter = MockAdapter {
+            url: "ws://127.0.0.1:1".to_string(),
+        };
+        assert_eq!(adapter.auth_msgs(), None);
+    }
+
+    #[test]
+    fn test_default_is_auth_confirmed_is_false() {
+        let adapter = MockAdapter {
+            url: "ws://127.0.0.1:1".to_string(),
+        };
+        assert!(!adapter.is_auth_confirmed(&"dummy".to_string()));
+    }
+
+    #[test]
+    fn test_default_auth_confirmation_timeout_is_none() {
+        let adapter = MockAdapter {
+            url: "ws://127.0.0.1:1".to_string(),
+        };
+        assert_eq!(adapter.auth_confirmation_timeout(), None);
     }
 }
