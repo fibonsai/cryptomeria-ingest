@@ -1,6 +1,6 @@
 [package]
 name = "cryptomeria-ingest"
-version = "0.0.17"
+version = "0.0.18"
 edition = "2024"
 license = "Apache-2.0"
 description = "Multi-exchange crypto market data ingestion library (OKX, Kraken, Bitstamp) — connects to exchange WS and returns a stream of normalized LOB/trade data"
