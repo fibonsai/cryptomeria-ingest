@@ -51,7 +51,8 @@ Add three new trait methods to `ExchangeAdapter` (in `src/wsloop.rs`):
 - `auth_msgs()` returns `Some(vec![("auth", build_auth_msg(key, secret))])`
   when `api_key` and `api_secret` are present; `None` otherwise.
 - `is_auth_confirmed()` delegates to `BitvavoWsMessage::is_auth_confirmed()`,
-  which checks `action == "authenticate"` and `success == true`.
+  which checks `event == "authenticate"` and `success == true` (the Bitvavo
+  server responds with `event`, not `action`; both are accepted for robustness).
 - `auth_confirmation_timeout()` returns `Some(Duration::from_secs(10))`.
 - A `success: Option<bool>` field was added to `BitvavoWsMessage` to parse the
   auth confirmation response.

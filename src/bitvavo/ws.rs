@@ -422,6 +422,16 @@ mod tests {
 
     #[test]
     fn test_is_auth_confirmed_true_for_success_message() {
+        // Server response uses `event` field (not `action`).
+        let a = adapter();
+        let msg: BitvavoWsMessage =
+            BitvavoWsMessage::from_json(r#"{"event":"authenticate","success":true}"#).unwrap();
+        assert!(a.is_auth_confirmed(&msg));
+    }
+
+    #[test]
+    fn test_is_auth_confirmed_true_for_action_field_with_success() {
+        // Backward compat: client-side echo uses `action` field.
         let a = adapter();
         let msg: BitvavoWsMessage =
             BitvavoWsMessage::from_json(r#"{"action":"authenticate","success":true}"#).unwrap();
@@ -432,7 +442,7 @@ mod tests {
     fn test_is_auth_confirmed_false_for_success_false() {
         let a = adapter();
         let msg: BitvavoWsMessage =
-            BitvavoWsMessage::from_json(r#"{"action":"authenticate","success":false}"#).unwrap();
+            BitvavoWsMessage::from_json(r#"{"event":"authenticate","success":false}"#).unwrap();
         assert!(!a.is_auth_confirmed(&msg));
     }
 

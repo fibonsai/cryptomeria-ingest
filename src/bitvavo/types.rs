@@ -128,9 +128,10 @@ impl BitvavoWsMessage {
     /// Classify the message type for dispatch.
     pub fn message_type(&self) -> MessageType {
         match self.action.as_deref() {
-            Some("authenticate") => MessageType::Auth,
             Some("getBook") => MessageType::BookSnapshot,
+            Some("authenticate") => MessageType::Auth,
             _ => match self.event.as_deref() {
+                Some("authenticate") => MessageType::Auth,
                 Some("subscribed") | Some("unsubscribed") => MessageType::Event,
                 Some("book") => MessageType::BookUpdate,
                 Some("trade") => MessageType::Trade,
@@ -143,9 +144,12 @@ impl BitvavoWsMessage {
     /// Returns `true` when this message confirms successful authentication.
     ///
     /// The Bitvavo WS Pro API responds to an `authenticate` request with a
-    /// message containing `action == "authenticate"` and `success == true`.
+    /// message containing `event == "authenticate"` and `success == true`.
+    /// (The client-side request itself uses `action == "authenticate"`.)
     pub fn is_auth_confirmed(&self) -> bool {
-        self.action.as_deref() == Some("authenticate") && self.success == Some(true)
+        let is_auth = self.action.as_deref() == Some("authenticate")
+            || self.event.as_deref() == Some("authenticate");
+        is_auth && self.success == Some(true)
     }
 
     /// Extract a `BookSnapshot` from a `getBook` response.
@@ -210,6 +214,40 @@ mod tests {
         assert_eq!(msg.key.as_deref(), Some("test_key"));
         assert_eq!(msg.signature.as_deref(), Some("abc123"));
         assert_eq!(msg.timestamp, Some(1609459200000));
+    }
+
+    #[test]
+    fn is_auth_confirmed_true_for_server_response_with_event_field() {
+        let json = r#"{"event":"authenticate","success":true}"#;
+        let msg = BitvavoWsMessage::from_json(json).unwrap();
+        assert_eq!(msg.message_type(), MessageType::Auth);
+        assert!(msg.is_auth_confirmed());
+    }
+
+    #[test]
+    fn is_auth_confirmed_true_for_action_field_with_success() {
+        // Backward compat: client-side echo of auth request also has action field.
+        let json = r#"{"action":"authenticate","success":true}"#;
+        let msg = BitvavoWsMessage::from_json(json).unwrap();
+        assert_eq!(msg.message_type(), MessageType::Auth);
+        assert!(msg.is_auth_confirmed());
+    }
+
+    #[test]
+    fn is_auth_confirmed_false_for_auth_event_without_success() {
+        let json = r#"{"event":"authenticate"}"#;
+        let msg = BitvavoWsMessage::from_json(json).unwrap();
+        assert_eq!(msg.message_type(), MessageType::Auth);
+        assert!(!msg.is_auth_confirmed());
+    }
+
+    #[test]
+    fn is_auth_confirmed_false_for_server_failure_response() {
+        let json = r#"{"event":"authenticate","success":false}"#;
+        let msg = BitvavoWsMessage::from_json(json).unwrap();
+        assert_eq!(msg.message_type(), MessageType::Auth);
+        assert!(!msg.is_auth_confirmed());
+        assert_eq!(msg.success, Some(false));
     }
 
     #[test]
