@@ -332,26 +332,149 @@ Only **Bitvavo** requires WebSocket authentication (HMAC-SHA256). All other exch
 for those exchanges.
 
 The credentials can be supplied in three ways — the method you choose depends on how
-you consume the library.
+you consume the library:
 
-### 1. Environment Variables (Demo Binary)
+| Method | Demo binary | Library API | Config file |
+|---|---|---|---|
+| **Environment variables** | ✅ (via Clap `env` attribute) | ✅ (`std::env::var`) | — |
+| **Command-line flags** | ✅ (`--api-key` / `--api-secret`) | — | — |
+| **Inline env (one-off)** | ✅ (`VAR=val binary`) | — | — |
+| **`.env` file** | ✅ (with `dotenv`/`config` crate) | ✅ (manual load) | — |
+| **TOML config file** | ✅ (`--config`) | — | ✅ |
+| **Struct fields** | — | ✅ (`api_key`/`api_secret`) | ✅ |
 
-The demo binary reads credentials from environment variables via Clap's `env` attribute.
-Set them before launching the demo:
+### Environment Variables
+
+The demo binary declares two Clap options with the `env` attribute, so credentials
+are read automatically from the process environment:
+
+| Clap flag | Environment variable | Required for |
+|---|---|---|
+| `--api-key` | `BITVAVO_API_KEY` | Bitvavo only |
+| `--api-secret` | `BITVAVO_API_SECRET` | Bitvavo only |
+
+**Precedence** (highest to lowest):
+
+1. `--api-key` / `--api-secret` flags on the command line
+2. `BITVAVO_API_KEY` / `BITVAVO_API_SECRET` environment variables
+3. `api_key` / `api_secret` in the TOML config file
+
+If both the flag and the environment variable are set, the **flag wins**. If neither
+is set, the library falls back to the TOML config (if `--config` was used).
+
+#### Setting env vars for a single command (inline)
+
+You don't need `export` — set the variables inline on the same line as the command.
+They exist only for the duration of that process and never leak into your shell:
 
 ```bash
-export BITVAVO_API_KEY="your_api_key"
-export BITVAVO_API_SECRET="your_api_secret"
-
-cargo run --release --bin cryptomeria-ingest-demo -- \
+BITVAVO_API_KEY="your_api_key" \
+BITVAVO_API_SECRET="your_api_secret" \
+  cargo run --release --bin cryptomeria-ingest-demo -- \
   --exchange bitvavo \
   --region global \
   --instrument BTC-EUR \
   --data-kind both
 ```
 
-Clap also lets you pass them explicitly on the command line, which takes precedence
-over the environment:
+#### Setting env vars for the shell session
+
+```bash
+export BITVAVO_API_KEY="your_api_key"
+export BITVAVO_API_SECRET="your_api_secret"
+```
+
+Then any subsequent invocation of the demo picks them up automatically:
+
+```bash
+cargo run --release --bin cryptomeria-ingest-demo -- \
+  --exchange bitvavo --region global --instrument BTC-EUR --data-kind both
+```
+
+#### Using a `.env` file
+
+For local development, keep credentials out of your shell by creating a `.env` file
+in the project root and loading it before the process starts. The demo binary does
+**not** load `.env` automatically (Clap's `env` attribute reads from the process
+environment, not from a file), so you need a helper. Two common approaches:
+
+**Option A — `.env` + shell** (simple, no extra dependencies):
+
+```bash
+# .env (add this file to .gitignore!)
+BITVAVO_API_KEY=your_api_key
+BITVAVO_API_SECRET=your_api_secret
+
+# Load and run in one step
+set -a; source .env; set +a
+cargo run --release --bin cryptomeria-ingest-demo -- \
+  --exchange bitvavo --region global --instrument BTC-EUR --data-kind both
+```
+
+**Option B — `config` crate** (production-ready, supports TOML + env + files):
+
+Add to `Cargo.toml`:
+```toml
+config = "0.15"
+```
+
+Then in your binary:
+```rust
+use config::Config;
+
+let settings = Config::builder()
+    .add_source(config::Environment::with_prefix("bitvavo").separator_renamed("_"))
+    .add_source(config::File::with_name("bitvavo.toml").format(config::FileFormat::Toml).required(false))
+    .build()
+    .unwrap()
+    .try_deserialize::<DataSourceConfig>()
+    .unwrap();
+```
+
+With this setup, `BITVAVO_API_KEY` env var maps to `api_key`, and a `bitvavo.toml`
+file can also provide it — env vars always take precedence over file values.
+
+#### Production deployment patterns
+
+Regardless of your deployment target, inject credentials as environment variables —
+never hardcode them:
+
+```dockerfile
+# Dockerfile
+ENV BITVAVO_API_KEY="your_api_key" \
+    BITVAVO_API_SECRET="your_api_secret"
+```
+
+```yaml
+# docker-compose.yml
+services:
+  cryptomeria-ingest:
+    image: your-registry/cryptomeria-ingest:latest
+    environment:
+      - BITVAVO_API_KEY=${BITVAVO_API_KEY}
+      - BITVAVO_API_SECRET=${BITVAVO_API_SECRET}
+    command: --exchange bitvavo --region global --instrument BTC-EUR --data-kind both
+```
+
+```bash
+# systemd
+Environment="BITVAVO_API_KEY=your_api_key"
+Environment="BITVAVO_API_SECRET=your_api_secret"
+ExecStart=/usr/local/bin/cryptomeria-ingest-demo --exchange bitvavo --region global --instrument BTC-EUR --data-kind both
+```
+
+```bash
+# Kubernetes (Secret)
+kubectl create secret generic bitvavo-credentials \
+  --from-literal=api-key="your_api_key" \
+  --from-literal=api-secret="your_api_secret"
+```
+
+### Command-Line Flags
+
+The demo binary also accepts explicit `--api-key` and `--api-secret` flags. Use this
+for one-off testing; for production or local development, prefer environment variables or
+a config file:
 
 ```bash
 cargo run --release --bin cryptomeria-ingest-demo -- \
@@ -363,9 +486,11 @@ cargo run --release --bin cryptomeria-ingest-demo -- \
   --api-secret "your_api_secret"
 ```
 
-### 2. Config File (TOML)
+### Config File (TOML)
 
-Use `--config` to load a TOML file. The file maps directly to `DataSourceConfig`:
+When using `--config`, the TOML file maps directly to `DataSourceConfig`. Credentials
+can be included here, but **only do this for non-production environments** — see the
+security tip below:
 
 ```toml
 exchange = "bitvavo"
@@ -383,13 +508,18 @@ max_level = 10
 cryptomeria-ingest-demo --config /path/to/bitvavo.toml
 ```
 
-> **Tip:** Keep the TOML file with credentials outside version control and add it to
-> `.gitignore`. You can template it from a `*.toml.example` file.
+> **Tip:** Keep credential files outside version control. A good pattern:
+> - `bitvavo.toml.example` — checked in, with placeholders (`api_key = "YOUR_API_KEY"`)
+> - `bitvavo.toml` — local-only, added to `.gitignore`, can be generated from the example
+> - For production, inject `BITVAVO_API_KEY` / `BITVAVO_API_SECRET` env vars instead of
+>   using a TOML file at all.
 
-### 3. Programmatically (Library API)
+### Programmatically (Library API)
 
-When using the library directly, construct `DataSourceConfig` with `Some(...)` for
-both fields:
+When using the library directly, read credentials from the environment and pass them
+as `Some(...)`. Use `.ok()` (returns `Option<String>`) instead of `.unwrap()` so a
+missing env var gives a clean `ConfigError::MissingCredentials` error rather than a
+panic:
 
 ```rust
 use cryptomeria_ingest::{DataSourceConfig, DataKind};
@@ -399,11 +529,11 @@ let config = DataSourceConfig {
     region: "global".into(),
     instrument: "BTC-EUR".into(),
     data_kind: DataKind::LOB | DataKind::TRADE,
-    api_key: Some(std::env::var("BITVAVO_API_KEY").unwrap()),
-    api_secret: Some(std::env::var("BITVAVO_API_SECRET").unwrap()),
+    api_key: std::env::var("BITVAVO_API_KEY").ok(),
+    api_secret: std::env::var("BITVAVO_API_SECRET").ok(),
     ..Default::default()
 };
-config.validate()?;  // returns Err(ConfigError::MissingCredentials) if either is None/empty
+config.validate()?;  // Err(ConfigError::MissingCredentials) if either is None/empty
 ```
 
 ### Credential Handling
@@ -415,6 +545,9 @@ config.validate()?;  // returns Err(ConfigError::MissingCredentials) if either i
 | **Signed** | HMAC-SHA256 signature generated fresh on each (re)connect with a millisecond timestamp |
 | **Logged?** | No — credentials are never logged; only the exchange name and instrument appear in log lines |
 | **Serde** | Both fields use `#[serde(default)]`, so they are optional in TOML/JSON configs and silently ignored for non-Bitvavo exchanges |
+| **Env var names** | `BITVAVO_API_KEY` / `BITVAVO_API_SECRET` (matched by Clap `env` attribute on the demo binary) |
+| **Flag names** | `--api-key` / `--api-secret` (Clap, takes precedence over env vars) |
+| **Config keys** | `api_key` / `api_secret` (TOML, lowest precedence) |
 
 ## Instrument Validation and Fallback
 
