@@ -246,16 +246,18 @@ impl ExchangeAdapter for BitvavoAdapter {
             MessageType::Auth | MessageType::Event | MessageType::Unknown => {
                 if msg.message_type() == MessageType::Auth {
                     if msg.is_auth_confirmed() {
-                        info!(
-                            "[bitvavo] auth confirmed: exchange=bitvavo instrument={} channel=auth",
-                            self.instrument
-                        );
-                    } else if msg.success == Some(false) {
-                        warn!(
-                            "[bitvavo] auth failed: exchange=bitvavo instrument={} channel=auth",
-                            self.instrument
-                        );
-                    }
+                            info!(
+                                "[bitvavo] auth confirmed: exchange=bitvavo instrument={} channel=auth",
+                                self.instrument
+                            );
+                        } else if msg.authenticated == Some(false)
+                            || msg.success == Some(false)
+                        {
+                            warn!(
+                                "[bitvavo] auth failed: exchange=bitvavo instrument={} channel=auth",
+                                self.instrument
+                            );
+                        }
                 } else if matches!(msg.message_type(), MessageType::Event) {
                     info!(
                         "[bitvavo] event: exchange=bitvavo instrument={} event={:?}",
@@ -422,16 +424,16 @@ mod tests {
 
     #[test]
     fn test_is_auth_confirmed_true_for_success_message() {
-        // Server response uses `event` field (not `action`).
+        // Bitvavo server responds with `{"event":"authenticate","authenticated":true}`.
         let a = adapter();
         let msg: BitvavoWsMessage =
-            BitvavoWsMessage::from_json(r#"{"event":"authenticate","success":true}"#).unwrap();
+            BitvavoWsMessage::from_json(r#"{"event":"authenticate","authenticated":true}"#).unwrap();
         assert!(a.is_auth_confirmed(&msg));
     }
 
     #[test]
     fn test_is_auth_confirmed_true_for_action_field_with_success() {
-        // Backward compat: client-side echo uses `action` field.
+        // Backward compat: `success` field also accepted.
         let a = adapter();
         let msg: BitvavoWsMessage =
             BitvavoWsMessage::from_json(r#"{"action":"authenticate","success":true}"#).unwrap();
@@ -442,7 +444,7 @@ mod tests {
     fn test_is_auth_confirmed_false_for_success_false() {
         let a = adapter();
         let msg: BitvavoWsMessage =
-            BitvavoWsMessage::from_json(r#"{"event":"authenticate","success":false}"#).unwrap();
+            BitvavoWsMessage::from_json(r#"{"event":"authenticate","authenticated":false}"#).unwrap();
         assert!(!a.is_auth_confirmed(&msg));
     }
 
