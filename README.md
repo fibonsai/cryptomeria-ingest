@@ -325,6 +325,97 @@ connection is treated as failed, a warning is logged, and the existing exponenti
 reconnect strategy is applied. When `None` (default), silence detection is disabled and
 behavior is unchanged.
 
+## Authentication
+
+Only **Bitvavo** requires WebSocket authentication (HMAC-SHA256). All other exchanges
+(OKX, Kraken, Bitstamp) connect anonymously, so `api_key` and `api_secret` are ignored
+for those exchanges.
+
+The credentials can be supplied in three ways — the method you choose depends on how
+you consume the library.
+
+### 1. Environment Variables (Demo Binary)
+
+The demo binary reads credentials from environment variables via Clap's `env` attribute.
+Set them before launching the demo:
+
+```bash
+export BITVAVO_API_KEY="your_api_key"
+export BITVAVO_API_SECRET="your_api_secret"
+
+cargo run --release --bin cryptomeria-ingest-demo -- \
+  --exchange bitvavo \
+  --region global \
+  --instrument BTC-EUR \
+  --data-kind both
+```
+
+Clap also lets you pass them explicitly on the command line, which takes precedence
+over the environment:
+
+```bash
+cargo run --release --bin cryptomeria-ingest-demo -- \
+  --exchange bitvavo \
+  --region global \
+  --instrument BTC-EUR \
+  --data-kind both \
+  --api-key "your_api_key" \
+  --api-secret "your_api_secret"
+```
+
+### 2. Config File (TOML)
+
+Use `--config` to load a TOML file. The file maps directly to `DataSourceConfig`:
+
+```toml
+exchange = "bitvavo"
+region = "global"
+instrument = "BTC-EUR"
+data_kind = "Lob|Trade"
+api_key = "your_api_key"
+api_secret = "your_api_secret"
+
+[resilience]
+max_level = 10
+```
+
+```bash
+cryptomeria-ingest-demo --config /path/to/bitvavo.toml
+```
+
+> **Tip:** Keep the TOML file with credentials outside version control and add it to
+> `.gitignore`. You can template it from a `*.toml.example` file.
+
+### 3. Programmatically (Library API)
+
+When using the library directly, construct `DataSourceConfig` with `Some(...)` for
+both fields:
+
+```rust
+use cryptomeria_ingest::{DataSourceConfig, DataKind};
+
+let config = DataSourceConfig {
+    exchange: "bitvavo".into(),
+    region: "global".into(),
+    instrument: "BTC-EUR".into(),
+    data_kind: DataKind::LOB | DataKind::TRADE,
+    api_key: Some(std::env::var("BITVAVO_API_KEY").unwrap()),
+    api_secret: Some(std::env::var("BITVAVO_API_SECRET").unwrap()),
+    ..Default::default()
+};
+config.validate()?;  // returns Err(ConfigError::MissingCredentials) if either is None/empty
+```
+
+### Credential Handling
+
+| Property | Detail |
+|---|---|
+| **Stored in** | `DataSourceConfig.api_key` / `DataSourceConfig.api_secret` (`Option<String>`) |
+| **Validated** | `config.validate()` returns `ConfigError::MissingCredentials` if Bitvavo and either field is `None` or empty |
+| **Signed** | HMAC-SHA256 signature generated fresh on each (re)connect with a millisecond timestamp |
+| **Logged?** | No — credentials are never logged; only the exchange name and instrument appear in log lines |
+| **Serde** | Both fields use `#[serde(default)]`, so they are optional in TOML/JSON configs and silently ignored for non-Bitvavo exchanges |
+
 ## Instrument Validation and Fallback
 
 The flow is:
