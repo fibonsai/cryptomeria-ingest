@@ -7,6 +7,15 @@ use ordered_float::OrderedFloat;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap};
 
+/// Bitstamp LOB is temporarily disabled while a known bug in the order-book
+/// model is being fixed (see the README warning). The LOB *stream* still
+/// subscribes and receives messages but returns an empty object
+/// (a `LobItem` with empty `bids`/`asks`) instead of the buggy data.
+///
+/// All parsing/processing logic in this module is retained and still covered
+/// by unit tests. To re-enable, flip this to `false`.
+pub const BITSTAMP_LOB_DISABLED: bool = true;
+
 /// Direction of a price level.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Side {
