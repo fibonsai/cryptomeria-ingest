@@ -576,7 +576,7 @@ config.validate()?;  // Err(ConfigError::MissingCredentials) if either is None/e
 
 The flow is:
 
-1. The `stream()` calls `validate_with_fallback()`, which confirms the instrument exists on the exchange — via REST for OKX, Bitstamp, and Bitvavo (`trading-pairs` endpoint) and via the Kraken WebSocket v2 `instrument` channel for Kraken (to stay consistent with WS v2 symbol names).
+1. The `stream()` calls `validate_with_fallback()`, which confirms the instrument exists on the exchange — via REST for OKX, Bitstamp, and Bitvavo (`/markets` endpoint) and via the Kraken WebSocket v2 `instrument` channel for Kraken (to stay consistent with WS v2 symbol names).
 2. If the primary instrument is rejected, fallback mappings generate candidate variants (see below) and each is tried until one is accepted.
 3. If no variant succeeds, `stream()` returns `IngestError::Config`.
 

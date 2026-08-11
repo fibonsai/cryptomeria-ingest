@@ -5,12 +5,12 @@ use reqwest::Client;
 use serde::Deserialize;
 use std::collections::HashSet;
 
-/// Validate instrument on Bitvavo using the REST `/trading-pairs` endpoint.
+/// Validate instrument on Bitvavo using the REST `/markets` endpoint.
 ///
 /// Markets are dash-separated (e.g. `BTC-EUR`).
 pub async fn validate_instrument(region: &str, instrument: &str) -> Result<(), IngestError> {
     let client = Client::new();
-    let url = format!("{}/trading-pairs", rest_url(region, "bitvavo"));
+    let url = build_validation_url(region);
     let response = client
         .get(&url)
         .send()
@@ -24,7 +24,7 @@ pub async fn validate_instrument(region: &str, instrument: &str) -> Result<(), I
         )));
     }
 
-    let data: Vec<BitvavoTradingPair> = response
+    let data: Vec<BitvavoMarket> = response
         .json()
         .await
         .map_err(|e| IngestError::Config(format!("Bitvavo JSON parse failed: {}", e)))?;
@@ -43,7 +43,7 @@ pub fn generate_fallback_variants(
 }
 
 #[derive(Debug, Deserialize)]
-struct BitvavoTradingPair {
+struct BitvavoMarket {
     market: String,
 }
 
@@ -61,9 +61,22 @@ fn check_instrument_in_set(
     }
 }
 
+/// Build the Bitvavo REST validation URL for the `/markets` endpoint.
+fn build_validation_url(region: &str) -> String {
+    format!("{}/markets", rest_url(region, "bitvavo"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_validation_url_uses_markets_endpoint() {
+        assert_eq!(
+            build_validation_url("global"),
+            "https://api.bitvavo.com/v2/markets"
+        );
+    }
 
     #[test]
     fn test_validate_instrument_ok_when_found() {
