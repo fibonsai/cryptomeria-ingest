@@ -66,6 +66,11 @@ impl KrakenAdapter {
         }
     }
 
+    /// Emit a filtered `LobItem` to the stream.
+    ///
+    /// The in-memory `book` retains **all** levels received from the WebSocket.
+    /// `to_lob_item` applies `max_level` / `max_level_pct` filtering only at this
+    /// emission boundary — it never mutates the book.
     fn emit_lob(&mut self, ts: u64) -> Option<MarketDataItem> {
         let lob = self
             .book
@@ -206,6 +211,16 @@ mod tests {
         KrakenAdapter::new("XBT/USD".into(), "global".into(), 0.0, None, data_kind)
     }
 
+    fn adapter_with_filter(max_level: Option<usize>, max_level_pct: f64) -> KrakenAdapter {
+        KrakenAdapter::new(
+            "XBT/USD".into(),
+            "global".into(),
+            max_level_pct,
+            max_level,
+            DataKind::LOB,
+        )
+    }
+
     #[test]
     fn test_build_subscribe_msg() {
         let msg = build_subscribe_msg("book", "BTC/USD");
@@ -343,5 +358,115 @@ mod tests {
         assert!(a.handle_message(&st).is_none());
         assert!(a.handle_message(&ev).is_none());
         assert!(a.handle_message(&un).is_none());
+    }
+
+    // ------------------------------------------------------------------
+    // Guarantee: memory book retains ALL levels from WS; filtering only
+    // in the emitted LobItem.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_snapshot_memory_full_emitted_filtered() {
+        let mut a = adapter_with_filter(Some(2), 0.0); // filter to top 2
+        let msg: KrakenWsMessage = serde_json::from_str(
+            r#"{
+                "channel": "book",
+                "type": "snapshot",
+                "data": [{
+                    "symbol": "XBT/USD",
+                    "bids": [
+                        {"price": 50000.0, "qty": 1.0},
+                        {"price": 49900.0, "qty": 2.0},
+                        {"price": 49800.0, "qty": 3.0},
+                        {"price": 49700.0, "qty": 4.0},
+                        {"price": 49600.0, "qty": 5.0}
+                    ],
+                    "asks": [
+                        {"price": 50100.0, "qty": 1.0},
+                        {"price": 50200.0, "qty": 2.0},
+                        {"price": 50300.0, "qty": 3.0},
+                        {"price": 50400.0, "qty": 4.0},
+                        {"price": 50500.0, "qty": 5.0}
+                    ],
+                    "checksum": 0,
+                    "timestamp": "2024-01-15T10:30:00.000000Z"
+                }]
+            }"#,
+        )
+        .unwrap();
+
+        let item = a.handle_message(&msg).expect("snapshot should emit a lob");
+        match &item {
+            MarketDataItem::Lob(lob) => {
+                assert_eq!(lob.bids.len(), 2, "emitted lob is filtered to 2 bids");
+                assert_eq!(lob.asks.len(), 2, "emitted lob is filtered to 2 asks");
+                assert_eq!(lob.exchange, "kraken");
+            }
+            _ => panic!("expected Lob item"),
+        }
+
+        // In-memory book must retain ALL 5 levels — filtering did NOT touch the book.
+        assert_eq!(a.book.num_bids(), 5, "memory book must have all 5 bids");
+        assert_eq!(a.book.num_asks(), 5, "memory book must have all 5 asks");
+
+        // full_lob_item returns all levels.
+        let full = a.book.full_lob_item(0, "kraken").unwrap();
+        assert_eq!(full.bids.len(), 5);
+        assert_eq!(full.asks.len(), 5);
+    }
+
+    #[test]
+    fn test_update_memory_full_after_filtered_emit() {
+        let mut a = adapter_with_filter(Some(2), 0.0);
+        let snap: KrakenWsMessage = serde_json::from_str(
+            r#"{
+                "channel": "book",
+                "type": "snapshot",
+                "data": [{
+                    "symbol": "XBT/USD",
+                    "bids": [
+                        {"price": 50000.0, "qty": 1.0},
+                        {"price": 49900.0, "qty": 2.0},
+                        {"price": 49800.0, "qty": 3.0},
+                        {"price": 49700.0, "qty": 4.0},
+                        {"price": 49600.0, "qty": 5.0}
+                    ],
+                    "asks": [
+                        {"price": 50100.0, "qty": 1.0},
+                        {"price": 50200.0, "qty": 2.0},
+                        {"price": 50300.0, "qty": 3.0},
+                        {"price": 50400.0, "qty": 4.0},
+                        {"price": 50500.0, "qty": 5.0}
+                    ],
+                    "checksum": 0,
+                    "timestamp": "2024-01-15T10:30:00.000000Z"
+                }]
+            }"#,
+        )
+        .unwrap();
+        a.handle_message(&snap);
+        assert_eq!(a.book.num_bids(), 5);
+        assert_eq!(a.book.num_asks(), 5);
+
+        // Update: remove best bid (50000 → qty 0), add new ask (50600).
+        let upd: KrakenWsMessage = serde_json::from_str(
+            r#"{
+                "channel": "book",
+                "type": "update",
+                "data": [{
+                    "symbol": "XBT/USD",
+                    "bids": [{"price": 50000.0, "qty": 0}],
+                    "asks": [{"price": 50600.0, "qty": 6.0}],
+                    "checksum": 0,
+                    "timestamp": "2024-01-15T10:30:01.000000Z"
+                }]
+            }"#,
+        )
+        .unwrap();
+        a.handle_message(&upd);
+
+        // Memory reflects the update: 4 bids (50000 removed), 6 asks (50600 added).
+        assert_eq!(a.book.num_bids(), 4, "50000 bid removed → 4 bids");
+        assert_eq!(a.book.num_asks(), 6, "50600 ask added → 6 asks");
     }
 }

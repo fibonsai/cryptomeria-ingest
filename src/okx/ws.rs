@@ -54,6 +54,11 @@ impl OkxAdapter {
         }
     }
 
+    /// Emit a filtered `LobItem` to the stream.
+    ///
+    /// The in-memory `book` retains **all** levels received from the WebSocket.
+    /// `to_lob_item` applies `max_level` / `max_level_pct` filtering only at this
+    /// emission boundary — it never mutates the book.
     fn emit_lob(&mut self, ts: u64) -> Option<MarketDataItem> {
         let lob = self
             .book
@@ -195,6 +200,16 @@ mod tests {
         OkxAdapter::new("BTC-USDT".into(), "global".into(), 0.0, None, data_kind)
     }
 
+    fn adapter_with_filter(max_level: Option<usize>, max_level_pct: f64) -> OkxAdapter {
+        OkxAdapter::new(
+            "BTC-USDT".into(),
+            "global".into(),
+            max_level_pct,
+            max_level,
+            DataKind::LOB,
+        )
+    }
+
     #[test]
     fn test_build_subscribe_msg() {
         let msg = build_subscribe_msg("books", "BTC-USDT");
@@ -326,5 +341,89 @@ mod tests {
         let msg: OkxWsMessage =
             serde_json::from_str(r#"{"arg":{"channel":"nonsense","instId":"BTC-USDT"}}"#).unwrap();
         assert!(a.handle_message(&msg).is_none());
+    }
+
+    // ------------------------------------------------------------------
+    // Guarantee: memory book retains ALL levels from WS; filtering only
+    // in the emitted LobItem.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_snapshot_memory_full_emitted_filtered() {
+        let mut a = adapter_with_filter(Some(2), 0.0); // filter to top 2
+        let msg: OkxWsMessage = serde_json::from_str(
+            r#"{
+                "arg": {"channel": "books", "instId": "BTC-USDT"},
+                "action": "snapshot",
+                "data": [{
+                    "asks": [["101.0","1.0"],["102.0","2.0"],["103.0","3.0"],["104.0","4.0"],["105.0","5.0"]],
+                    "bids": [["100.0","1.0"],["99.0","2.0"],["98.0","3.0"],["97.0","4.0"],["96.0","5.0"]],
+                    "ts": "1000",
+                    "checksum": 0
+                }]
+            }"#,
+        )
+        .unwrap();
+
+        let item = a.handle_message(&msg).expect("snapshot should emit a lob");
+        match &item {
+            MarketDataItem::Lob(lob) => {
+                assert_eq!(lob.bids.len(), 2, "emitted lob is filtered to 2 bids");
+                assert_eq!(lob.asks.len(), 2, "emitted lob is filtered to 2 asks");
+                assert_eq!(lob.exchange, "okx");
+            }
+            _ => panic!("expected Lob item"),
+        }
+
+        // In-memory book must retain ALL 5 levels — filtering did NOT touch the book.
+        assert_eq!(a.book.num_bids(), 5, "memory book must have all 5 bids");
+        assert_eq!(a.book.num_asks(), 5, "memory book must have all 5 asks");
+
+        // full_lob_item returns all levels.
+        let full = a.book.full_lob_item(0, "okx").unwrap();
+        assert_eq!(full.bids.len(), 5);
+        assert_eq!(full.asks.len(), 5);
+    }
+
+    #[test]
+    fn test_update_memory_full_after_filtered_emit() {
+        let mut a = adapter_with_filter(Some(2), 0.0);
+        // Snapshot with 5 levels each side.
+        let snap: OkxWsMessage = serde_json::from_str(
+            r#"{
+                "arg": {"channel": "books", "instId": "BTC-USDT"},
+                "action": "snapshot",
+                "data": [{
+                    "asks": [["101.0","1.0"],["102.0","2.0"],["103.0","3.0"],["104.0","4.0"],["105.0","5.0"]],
+                    "bids": [["100.0","1.0"],["99.0","2.0"],["98.0","3.0"],["97.0","4.0"],["96.0","5.0"]],
+                    "ts": "1000",
+                    "checksum": 0
+                }]
+            }"#,
+        )
+        .unwrap();
+        a.handle_message(&snap);
+        assert_eq!(a.book.num_bids(), 5);
+        assert_eq!(a.book.num_asks(), 5);
+
+        // Update: remove best bid (100.0 → size 0), add new ask (106.0).
+        let upd: OkxWsMessage = serde_json::from_str(
+            r#"{
+                "arg": {"channel": "books", "instId": "BTC-USDT"},
+                "action": "update",
+                "data": [{
+                    "asks": [["106.0","6.0"]],
+                    "bids": [["100.0","0.0","0","0"]],
+                    "ts": "2000",
+                    "checksum": 0
+                }]
+            }"#,
+        )
+        .unwrap();
+        a.handle_message(&upd);
+
+        // Memory reflects the update: 4 bids (100.0 removed), 6 asks (106.0 added).
+        assert_eq!(a.book.num_bids(), 4, "96.0 bid removed → 4 bids");
+        assert_eq!(a.book.num_asks(), 6, "106.0 ask added → 6 asks");
     }
 }

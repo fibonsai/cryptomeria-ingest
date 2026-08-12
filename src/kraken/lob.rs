@@ -14,6 +14,11 @@ pub enum Side {
 }
 
 /// In-memory order book for Kraken.
+///
+/// This book stores **every** level received from the exchange WebSocket —
+/// complete snapshots plus all incremental updates — with no pre-filtering.
+/// The configured filters (`max_level`, `max_level_pct`) are applied only when
+/// [`to_lob_item`](OrderBook::to_lob_item) produces a `LobItem` for the stream.
 #[derive(Debug, Clone)]
 pub struct OrderBook {
     pub bids: BTreeMap<Reverse<OrderedFloat<f64>>, f64>,
@@ -147,6 +152,8 @@ impl OrderBook {
         }
     }
 
+    /// Process a Kraken WebSocket message, applying ALL levels to the
+    /// in-memory book without any pre-filtering.
     pub fn process_msg(&mut self, msg: &KrakenWsMessage) {
         let data = match msg.data.first() {
             Some(d) => d,
@@ -202,10 +209,26 @@ impl OrderBook {
         formatted.join(", ")
     }
 
+    /// Create a LobItem containing **all** in-memory levels — no filtering.
+    ///
+    /// Guaranteed to return every level received from the WebSocket and stored
+    /// via `process_msg` / `apply_snapshot` / `apply_update`. Filtering by
+    /// `max_level` / `max_level_pct` is applied only in [`to_lob_item`].
+    pub fn full_lob_item(&self, ts: u64, exchange: &str) -> Option<LobItem> {
+        self.to_lob_item(ts, exchange, None, 0.0)
+    }
+
     /// Create a LobItem with post-filtering applied.
     ///
-    /// Applies max_level and max_level_pct filters, sorts bids ascending (worst to best,
-    /// so best_bid is last element) and asks ascending (best to worst, so best_ask is first element).
+    /// This is the **only** place where `max_level` / `max_level_pct` filters
+    /// are applied. The in-memory book is never mutated.
+    ///
+    /// Sorts bids ascending (worst to best, so best_bid is last element)
+    /// and asks ascending (best to worst, so best_ask is first element).
+    ///
+    /// **Guarantee:** calling this method does **not** mutate the in-memory order book.
+    /// The book retains all levels received from the WebSocket; only the returned
+    /// `LobItem` is filtered.
     pub fn to_lob_item(
         &self,
         ts: u64,
@@ -522,5 +545,125 @@ mod tests {
         let lob = book.to_lob_item(0, "test", None, 150.0).unwrap();
         assert_eq!(lob.bids.len(), 2, "pct=150.0 should keep all bids");
         assert_eq!(lob.asks.len(), 1);
+    }
+
+    // ------------------------------------------------------------------
+    // Guarantee: in-memory OrderBook retains ALL levels from every WS
+    // snapshot/update. Filtering happens ONLY in to_lob_item /
+    // full_lob_item — never during processing.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_full_lob_item_returns_all_levels() {
+        let mut book = OrderBook::new();
+        book.apply_snapshot(
+            &[
+                (50000.0, 1.0),
+                (49900.0, 2.0),
+                (49800.0, 3.0),
+                (49700.0, 4.0),
+            ],
+            Side::Bid,
+        );
+        book.apply_snapshot(
+            &[
+                (50100.0, 1.0),
+                (50200.0, 2.0),
+                (50300.0, 3.0),
+                (50400.0, 4.0),
+            ],
+            Side::Ask,
+        );
+        let lob = book.full_lob_item(0, "kraken").unwrap();
+        assert_eq!(
+            lob.bids.len(),
+            4,
+            "full_lob_item must return ALL 4 bid levels (no filtering)"
+        );
+        assert_eq!(
+            lob.asks.len(),
+            4,
+            "full_lob_item must return ALL 4 ask levels (no filtering)"
+        );
+    }
+
+    #[test]
+    fn test_memory_retains_all_levels_after_filtered_lob_item() {
+        let mut book = OrderBook::new();
+        book.apply_snapshot(
+            &[
+                (50000.0, 1.0),
+                (49900.0, 2.0),
+                (49800.0, 3.0),
+                (49700.0, 4.0),
+            ],
+            Side::Bid,
+        );
+        book.apply_snapshot(
+            &[
+                (50100.0, 1.0),
+                (50200.0, 2.0),
+                (50300.0, 3.0),
+                (50400.0, 4.0),
+            ],
+            Side::Ask,
+        );
+        // to_lob_item with max_level=1 must produce a 1-level lob...
+        let lob = book.to_lob_item(0, "kraken", Some(1), 0.0).unwrap();
+        assert_eq!(lob.bids.len(), 1, "filtered lob should have 1 bid");
+        assert_eq!(lob.asks.len(), 1, "filtered lob should have 1 ask");
+        // ...but the in-memory book must STILL contain all 4 levels.
+        assert_eq!(book.num_bids(), 4, "memory book must retain all 4 bids");
+        assert_eq!(book.num_asks(), 4, "memory book must retain all 4 asks");
+    }
+
+    #[test]
+    fn test_full_lob_item_equals_unfiltered_to_lob_item() {
+        let mut book = OrderBook::new();
+        book.apply_snapshot(&[(50000.0, 1.0), (49900.0, 2.0), (49800.0, 3.0)], Side::Bid);
+        book.apply_snapshot(&[(50100.0, 1.0), (50200.0, 2.0), (50300.0, 3.0)], Side::Ask);
+        let full = book.full_lob_item(0, "kraken").unwrap();
+        let unfiltered = book.to_lob_item(0, "kraken", None, 0.0).unwrap();
+        assert_eq!(full.bids.len(), unfiltered.bids.len());
+        assert_eq!(full.asks.len(), unfiltered.asks.len());
+        for (a, b) in full.bids.iter().zip(unfiltered.bids.iter()) {
+            assert_eq!(a.price, b.price);
+            assert_eq!(a.size, b.size);
+        }
+        for (a, b) in full.asks.iter().zip(unfiltered.asks.iter()) {
+            assert_eq!(a.price, b.price);
+            assert_eq!(a.size, b.size);
+        }
+    }
+
+    #[test]
+    fn test_to_lob_item_with_filter_returns_fewer_levels_than_full() {
+        let mut book = OrderBook::new();
+        book.apply_snapshot(
+            &[
+                (50000.0, 1.0),
+                (49900.0, 2.0),
+                (49800.0, 3.0),
+                (49700.0, 4.0),
+                (49600.0, 5.0),
+            ],
+            Side::Bid,
+        );
+        book.apply_snapshot(
+            &[
+                (50100.0, 1.0),
+                (50200.0, 2.0),
+                (50300.0, 3.0),
+                (50400.0, 4.0),
+                (50500.0, 5.0),
+            ],
+            Side::Ask,
+        );
+        let full = book.full_lob_item(0, "kraken").unwrap();
+        let filtered = book.to_lob_item(0, "kraken", Some(2), 0.0).unwrap();
+        assert_eq!(full.bids.len(), 5, "memory has 5 bids");
+        assert_eq!(filtered.bids.len(), 2, "filtered lob has 2 bids");
+        assert_eq!(full.asks.len(), 5, "memory has 5 asks");
+        assert_eq!(filtered.asks.len(), 2, "filtered lob has 2 asks");
     }
 }

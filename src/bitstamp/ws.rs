@@ -64,11 +64,17 @@ impl BitstampAdapter {
         }
     }
 
+    /// Emit a filtered `LobItem` to the stream.
+    ///
+    /// The in-memory `book` retains **all** levels received from the WebSocket.
+    /// `to_lob_item` applies `max_level` / `max_level_pct` filtering only at this
+    /// emission boundary — it never mutates the book.
+    ///
+    /// While Bitstamp LOB is disabled, emit an empty object (empty bids/asks)
+    /// rather than the buggy real order-book data. The order-book logic in
+    /// `lob.rs` is still exercised by `process_msg` below but its result is
+    /// discarded; set `BITSTAMP_LOB_DISABLED = false` to re-enable real data.
     fn emit_lob(&mut self, ts: u64) -> Option<MarketDataItem> {
-        // While Bitstamp LOB is disabled, emit an empty object (empty bids/asks)
-        // rather than the buggy real order-book data. The order-book logic in
-        // `lob.rs` is still exercised by `process_msg` below but its result is
-        // discarded; set `BITSTAMP_LOB_DISABLED = false` to re-enable real data.
         let lob = if BITSTAMP_LOB_DISABLED {
             LobItem {
                 ts,
@@ -289,6 +295,18 @@ mod tests {
         )
     }
 
+    fn adapter_with_filter(max_level: Option<usize>, max_level_pct: f64) -> BitstampAdapter {
+        BitstampAdapter::new(
+            "BTC/USD".into(),
+            "bitstamp".into(),
+            "global".into(),
+            "BTC/USD".into(),
+            max_level_pct,
+            max_level,
+            DataKind::LOB,
+        )
+    }
+
     #[test]
     fn test_build_subscribe_msg() {
         let msg = build_subscribe_msg("live_trades_btcusd");
@@ -487,5 +505,47 @@ mod tests {
         // and be emitted; with LOB disabled it is always empty, so it is deduplicated.
         let second = a.handle_message(&msg2);
         assert!(second.is_none(), "repeated empty lob must be deduplicated");
+    }
+
+    // ------------------------------------------------------------------
+    // Guarantee: memory book retains ALL levels from WS; filtering only
+    // in the emitted LobItem. (Bitstamp LOB is currently disabled —
+    // emitted lob is empty, but memory book still stores full data.)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_snapshot_memory_full_emitted_empty_lob_disabled() {
+        let mut a = adapter_with_filter(Some(2), 0.0);
+        let msg: BitstampWsMessage = BitstampWsMessage::from_json(
+            r#"{
+                "event": "snapshot",
+                "channel": "diff_order_book_btcusd",
+                "data": {
+                    "bids": [["100.0","1.0"],["99.0","2.0"],["98.0","3.0"],["97.0","4.0"],["96.0","5.0"]],
+                    "asks": [["101.0","1.0"],["102.0","2.0"],["103.0","3.0"],["104.0","4.0"],["105.0","5.0"]]
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let item = a.handle_message(&msg).expect("snapshot should emit a lob");
+        match &item {
+            MarketDataItem::Lob(lob) => {
+                // Bitstamp LOB is disabled — emitted lob is always empty.
+                assert!(lob.bids.is_empty(), "disabled lob has empty bids");
+                assert!(lob.asks.is_empty(), "disabled lob has empty asks");
+                assert_eq!(lob.exchange, "bitstamp");
+            }
+            _ => panic!("expected Lob item"),
+        }
+
+        // In-memory book must still retain ALL 5 levels.
+        assert_eq!(a.book.num_bids(), 5, "memory book must have all 5 bids");
+        assert_eq!(a.book.num_asks(), 5, "memory book must have all 5 asks");
+
+        // full_lob_item returns all levels from memory.
+        let full = a.book.full_lob_item(0, "bitstamp").unwrap();
+        assert_eq!(full.bids.len(), 5);
+        assert_eq!(full.asks.len(), 5);
     }
 }

@@ -7,6 +7,11 @@ use std::collections::BTreeMap;
 
 /// In-memory order book for Bitvavo, with sequence-number-aware
 /// `apply_snapshot` / `apply_update` / pending-deltas buffering.
+///
+/// This book stores **every** level received from the exchange WebSocket —
+/// complete snapshots plus all incremental updates — with no pre-filtering.
+/// The configured filters (`max_level`, `max_level_pct`) are applied only when
+/// [`to_lob_item`](OrderBook::to_lob_item) produces a `LobItem` for the stream.
 #[derive(Debug, Clone)]
 pub struct OrderBook {
     pub bids: BTreeMap<Reverse<OrderedFloat<f64>>, f64>,
@@ -197,7 +202,20 @@ impl OrderBook {
         }
     }
 
+    /// Create a LobItem containing **all** in-memory levels — no filtering.
+    ///
+    /// Guaranteed to return every level received from the WebSocket and stored
+    /// via `apply_snapshot` / `apply_update` / `drain_pending`. Filtering by
+    /// `max_level` / `max_level_pct` is applied only in [`to_lob_item`].
+    pub fn full_lob_item(&self, ts: u64, exchange: &str) -> Option<LobItem> {
+        self.to_lob_item(ts, exchange, None, 0.0)
+    }
+
     /// Create a LobItem with post-filtering applied.
+    ///
+    /// **Guarantee:** calling this method does **not** mutate the in-memory order book.
+    /// The book retains all levels received from the WebSocket; only the returned
+    /// `LobItem` is filtered.
     pub fn to_lob_item(
         &self,
         ts: u64,
@@ -624,5 +642,131 @@ mod tests {
         let out = book.display("BTC-EUR", 0.0);
         assert!(out.contains("bids=2"));
         assert!(out.contains("asks=1"));
+    }
+
+    // ------------------------------------------------------------------
+    // Guarantee: in-memory OrderBook retains ALL levels from every WS
+    // snapshot/update. Filtering happens ONLY in to_lob_item /
+    // full_lob_item — never during processing.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_full_lob_item_returns_all_levels() {
+        let mut book = OrderBook::new();
+        book.apply_snapshot(&snapshot(
+            "BTC-EUR",
+            1,
+            vec![
+                lv("100.0", "1.0"),
+                lv("99.0", "2.0"),
+                lv("98.0", "3.0"),
+                lv("97.0", "4.0"),
+            ],
+            vec![
+                lv("101.0", "1.0"),
+                lv("102.0", "2.0"),
+                lv("103.0", "3.0"),
+                lv("104.0", "4.0"),
+            ],
+        ));
+        let lob = book.full_lob_item(0, "bitvavo").unwrap();
+        assert_eq!(
+            lob.bids.len(),
+            4,
+            "full_lob_item must return ALL 4 bid levels (no filtering)"
+        );
+        assert_eq!(
+            lob.asks.len(),
+            4,
+            "full_lob_item must return ALL 4 ask levels (no filtering)"
+        );
+    }
+
+    #[test]
+    fn test_memory_retains_all_levels_after_filtered_lob_item() {
+        let mut book = OrderBook::new();
+        book.apply_snapshot(&snapshot(
+            "BTC-EUR",
+            1,
+            vec![
+                lv("100.0", "1.0"),
+                lv("99.0", "2.0"),
+                lv("98.0", "3.0"),
+                lv("97.0", "4.0"),
+            ],
+            vec![
+                lv("101.0", "1.0"),
+                lv("102.0", "2.0"),
+                lv("103.0", "3.0"),
+                lv("104.0", "4.0"),
+            ],
+        ));
+        // to_lob_item with max_level=1 must produce a 1-level lob...
+        let lob = book.to_lob_item(0, "bitvavo", Some(1), 0.0).unwrap();
+        assert_eq!(lob.bids.len(), 1, "filtered lob should have 1 bid");
+        assert_eq!(lob.asks.len(), 1, "filtered lob should have 1 ask");
+        // ...but the in-memory book must STILL contain all 4 levels.
+        assert_eq!(
+            book.num_bids(),
+            4,
+            "memory book must retain all 4 bids after filtered emit"
+        );
+        assert_eq!(
+            book.num_asks(),
+            4,
+            "memory book must retain all 4 asks after filtered emit"
+        );
+    }
+
+    #[test]
+    fn test_full_lob_item_equals_unfiltered_to_lob_item() {
+        let mut book = OrderBook::new();
+        book.apply_snapshot(&snapshot(
+            "BTC-EUR",
+            1,
+            vec![lv("100.0", "1.0"), lv("99.0", "2.0"), lv("98.0", "3.0")],
+            vec![lv("101.0", "1.0"), lv("102.0", "2.0"), lv("103.0", "3.0")],
+        ));
+        let full = book.full_lob_item(0, "bitvavo").unwrap();
+        let unfiltered = book.to_lob_item(0, "bitvavo", None, 0.0).unwrap();
+        assert_eq!(full.bids.len(), unfiltered.bids.len());
+        assert_eq!(full.asks.len(), unfiltered.asks.len());
+        for (a, b) in full.bids.iter().zip(unfiltered.bids.iter()) {
+            assert_eq!(a.price, b.price);
+            assert_eq!(a.size, b.size);
+        }
+        for (a, b) in full.asks.iter().zip(unfiltered.asks.iter()) {
+            assert_eq!(a.price, b.price);
+            assert_eq!(a.size, b.size);
+        }
+    }
+
+    #[test]
+    fn test_to_lob_item_with_filter_returns_fewer_levels_than_full() {
+        let mut book = OrderBook::new();
+        book.apply_snapshot(&snapshot(
+            "BTC-EUR",
+            1,
+            vec![
+                lv("100.0", "1.0"),
+                lv("99.0", "2.0"),
+                lv("98.0", "3.0"),
+                lv("97.0", "4.0"),
+                lv("96.0", "5.0"),
+            ],
+            vec![
+                lv("101.0", "1.0"),
+                lv("102.0", "2.0"),
+                lv("103.0", "3.0"),
+                lv("104.0", "4.0"),
+                lv("105.0", "5.0"),
+            ],
+        ));
+        let full = book.full_lob_item(0, "bitvavo").unwrap();
+        let filtered = book.to_lob_item(0, "bitvavo", Some(2), 0.0).unwrap();
+        assert_eq!(full.bids.len(), 5, "memory has 5 bids");
+        assert_eq!(filtered.bids.len(), 2, "filtered lob has 2 bids");
+        assert_eq!(full.asks.len(), 5, "memory has 5 asks");
+        assert_eq!(filtered.asks.len(), 2, "filtered lob has 2 asks");
     }
 }
