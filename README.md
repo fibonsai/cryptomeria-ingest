@@ -707,7 +707,7 @@ Each exchange adapter (`okx::ws::OkxAdapter`, `kraken::ws::KrakenAdapter`, `bits
 - `parse_message(&self, text: &str) -> Result<Self::Message, String>`: parse raw WebSocket text
 - `handle_message(&mut self, msg: &Self::Message) -> Option<MarketDataItem>`: process a parsed message, update internal state, return an item to emit
 - `handle_heartbeat(&self, msg: &Self::Message) -> bool`: whether to respond to this message as a heartbeat
-- `async on_reconnect(&self) -> Result<Vec<MarketDataItem>, String>`: optional async hook to fetch snapshot on reconnect (used by Bitstamp for the LOB channel)
+- `async on_reconnect(&self) -> Result<Vec<MarketDataItem>, String>`: optional async hook to fetch snapshot on reconnect (used by Bitstamp for the LOB channel; also overridden by Kraken, which resets its local book so the first post-reconnect snapshot re-seeds cleanly — see ADR-020)
 
 ### WebSocket Loop (`wsloop::run_exchange_stream`)
 
