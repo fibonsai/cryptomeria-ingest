@@ -22,6 +22,7 @@ pub async fn build_channel_streams(
     let max_level_pct = config.max_level_pct;
     let max_level = config.max_level;
     let checksum_log = config.checksum_log;
+    let crossguard_log = config.crossguard_log;
     crate::wsloop::spawn_per_channel_streams(config, &kinds, move |kind| {
         KrakenAdapter::new(
             validated_instrument.clone(),
@@ -30,6 +31,7 @@ pub async fn build_channel_streams(
             max_level,
             kind,
             checksum_log,
+            crossguard_log,
         )
     })
     .await

@@ -22,6 +22,7 @@ fn kraken_adapter_subscribe_msgs_covers_book_and_trade() {
         None,
         DataKind::LOB | DataKind::TRADE,
         false,
+        false,
     );
     let msgs = adapter.subscribe_msgs();
     assert_eq!(msgs.len(), 2);
@@ -43,6 +44,7 @@ fn kraken_adapter_subscribe_msgs_lob_only() {
         None,
         DataKind::LOB,
         false,
+        false,
     );
     let msgs = adapter.subscribe_msgs();
     assert_eq!(msgs.len(), 1);
@@ -58,6 +60,7 @@ fn kraken_adapter_subscribe_msgs_trade_only() {
         0.0,
         None,
         DataKind::TRADE,
+        false,
         false,
     );
     let msgs = adapter.subscribe_msgs();
@@ -75,6 +78,7 @@ fn kraken_url_for_region() {
         None,
         DataKind::LOB | DataKind::TRADE,
         false,
+        false,
     );
     assert!(adapter.url().contains("wss://"));
 }
@@ -87,6 +91,7 @@ fn kraken_trade_seq_id_from_trade_id() {
         0.0,
         None,
         DataKind::LOB | DataKind::TRADE,
+        false,
         false,
     );
     // Realistic Kraken WS v2 `trade` channel push: there is NO top-level

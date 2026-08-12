@@ -40,6 +40,12 @@ struct Cli {
     /// logged when the log level is DEBUG). Prevents exchange-feed log spoofing.
     #[clap(long, default_value_t = false)]
     checksum_log: bool,
+    /// When set, emit `[kraken]` crossing-guard rejection warnings (an update
+    /// whose price would cross the book: ask ≤ best bid or bid ≥ best ask).
+    /// Otherwise only logged when the log level is DEBUG. The guard still
+    /// rejects/drops the crossed level unconditionally — only the warn! is gated.
+    #[clap(long, default_value_t = false)]
+    crossguard_log: bool,
     #[clap(flatten)]
     resilience: ResilienceCli,
 }
@@ -122,6 +128,7 @@ async fn main() {
             api_key: cli.api_key,
             api_secret: cli.api_secret,
             checksum_log: cli.checksum_log,
+            crossguard_log: cli.crossguard_log,
         }
     };
 
