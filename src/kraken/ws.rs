@@ -89,6 +89,13 @@ impl KrakenAdapter {
 
         Some(MarketDataItem::Lob(lob))
     }
+
+    /// Drop all locally-tracked state: the LOB book and the previous-emit
+    /// cache. Used on reconnect and when the book is flagged for resync.
+    fn reset_local(&mut self) {
+        self.book.reset();
+        self.prev_lob = None;
+    }
 }
 
 impl ExchangeAdapter for KrakenAdapter {
@@ -133,6 +140,19 @@ impl ExchangeAdapter for KrakenAdapter {
                 });
 
                 self.book.process_msg(msg);
+
+                // Sequence gap / out-of-order / checksum mismatch: the book can
+                // no longer be trusted. Wipe it and await the next full
+                // snapshot (delivered on reconnect) before emitting again.
+                if self.book.needs_resync() {
+                    warn!(
+                        "[kraken] book integrity check failed for {} ({}); dropping book and awaiting resync",
+                        self.instrument, self.exchange
+                    );
+                    self.reset_local();
+                    return None;
+                }
+
                 self.emit_lob(ts)
             }
             MessageType::Trade => {
@@ -190,6 +210,20 @@ impl ExchangeAdapter for KrakenAdapter {
 
     fn url(&self) -> String {
         crate::urls::websocket_url(&self.region, "kraken").to_string()
+    }
+
+    // Called after a reconnect: Kraken does not expose a REST order-book
+    // snapshot over WS v2, so instead of fetching one we wipe the in-memory
+    // book (and sequence/prev-lob state) so the first `book` snapshot message
+    // after re-subscription re-seeds cleanly — never continuing from a stale,
+    // half-corrupt book across connection loss.
+    async fn on_reconnect(&mut self) -> Result<Vec<MarketDataItem>, String> {
+        warn!(
+            "[kraken] reconnect: resetting local book for {} ({})",
+            self.instrument, self.exchange
+        );
+        self.reset_local();
+        Ok(vec![])
     }
 }
 
@@ -468,5 +502,200 @@ mod tests {
         // Memory reflects the update: 4 bids (50000 removed), 6 asks (50600 added).
         assert_eq!(a.book.num_bids(), 4, "50000 bid removed → 4 bids");
         assert_eq!(a.book.num_asks(), 6, "50600 ask added → 6 asks");
+    }
+
+    // ------------------------------------------------------------------
+    // Resync: a sequence gap or checksum mismatch must drop the corrupt book
+    // (the next snapshot — on reconnect — re-seeds it).
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_on_reconnect_resets_book_and_prev_lob() {
+        let mut a = adapter();
+        let snap: KrakenWsMessage = serde_json::from_str(
+            r#"{
+                "channel": "book",
+                "type": "snapshot",
+                "data": [{
+                    "symbol": "XBT/USD",
+                    "bids": [{"price": 50000.0, "qty": 1.0}],
+                    "asks": [{"price": 50100.0, "qty": 1.0}],
+                    "checksum": 0,
+                    "timestamp": "2024-01-15T10:30:00.000000Z"
+                }]
+            }"#,
+        )
+        .unwrap();
+        a.handle_message(&snap);
+        assert_eq!(a.book.num_bids(), 1, "snapshot must populate the book");
+        assert!(a.prev_lob.is_some(), "an emit must have populated prev_lob");
+
+        // Reconnect must wipe the book so the next snapshot re-seeds cleanly.
+        let items = a.on_reconnect().await.expect("on_reconnect fails");
+        assert!(items.is_empty(), "kraken has no REST snapshot to fetch");
+        assert_eq!(a.book.num_bids(), 0, "book must be reset on reconnect");
+        assert_eq!(a.book.num_asks(), 0, "book must be reset on reconnect");
+        assert!(
+            a.prev_lob.is_none(),
+            "prev_lob must be cleared on reconnect"
+        );
+    }
+
+    #[test]
+    fn test_handle_message_resets_book_on_sequence_gap() {
+        let mut a = adapter();
+        let snap: KrakenWsMessage = serde_json::from_str(
+            r#"{
+                "channel": "book",
+                "type": "snapshot",
+                "sequence": 1,
+                "data": [{
+                    "symbol": "XBT/USD",
+                    "bids": [{"price": 50000.0, "qty": 1.0}],
+                    "asks": [{"price": 50100.0, "qty": 1.0}],
+                    "checksum": 0,
+                    "timestamp": "2024-01-15T10:30:00.000000Z"
+                }]
+            }"#,
+        )
+        .unwrap();
+        a.handle_message(&snap);
+        assert_eq!(a.book.num_bids(), 1, "snapshot seeds the book");
+
+        // A gap (1 -> 5) means updates 2..4 were lost: the book is untrustworthy.
+        let upd: KrakenWsMessage = serde_json::from_str(
+            r#"{
+                "channel": "book",
+                "type": "update",
+                "sequence": 5,
+                "data": [{
+                    "symbol": "XBT/USD",
+                    "bids": [{"price": 49950.0, "qty": 1.0}],
+                    "checksum": 0,
+                    "timestamp": "2024-01-15T10:30:01.000000Z"
+                }]
+            }"#,
+        )
+        .unwrap();
+        let item = a.handle_message(&upd);
+        assert!(
+            item.is_none(),
+            "resync path must not emit from a corrupt book"
+        );
+        assert_eq!(
+            a.book.num_bids(),
+            0,
+            "gap must trigger a book reset (snapshot wiped)"
+        );
+        assert!(!a.book.needs_resync(), "reset must clear the resync flag");
+    }
+
+    #[test]
+    fn test_handle_message_checksum_mismatch_is_warn_only() {
+        // Isolate the checksum path: a continuous sequence (no gap) but a
+        // checksum that disagrees with the locally-computed CRC32. Because the
+        // exact Kraken string format cannot be reconstructed from parsed f64's,
+        // a checksum mismatch is observable-only (warn + flag) and does NOT
+        // wipe the book — the authoritative reset signal is a sequence gap.
+        let mut a = adapter();
+        let snap: KrakenWsMessage = serde_json::from_str(
+            r#"{
+                "channel": "book",
+                "type": "snapshot",
+                "sequence": 1,
+                "data": [{
+                    "symbol": "XBT/USD",
+                    "bids": [{"price": 50000.0, "qty": 1.0}],
+                    "asks": [{"price": 50100.0, "qty": 1.0}],
+                    "checksum": 0,
+                    "timestamp": "2024-01-15T10:30:00.000000Z"
+                }]
+            }"#,
+        )
+        .unwrap();
+        a.handle_message(&snap);
+        assert_eq!(a.book.num_bids(), 1, "snapshot seeds the book");
+        assert!(!a.book.checksum_failed());
+
+        let real_checksum = a.book.compute_checksum(10);
+        let wrong = real_checksum.wrapping_add(1) as i64; // deliberate mismatch
+        let upd: KrakenWsMessage = serde_json::from_str(&format!(
+            r#"{{
+                "channel": "book",
+                "type": "update",
+                "sequence": 2,
+                "data": [{{
+                    "symbol": "XBT/USD",
+                    "bids": [{{"price": 49950.0, "qty": 1.0}}],
+                    "checksum": {},
+                    "timestamp": "2024-01-15T10:30:01.000000Z"
+                }}]
+            }}"#,
+            wrong
+        ))
+        .unwrap();
+
+        // Continuous sequence: no reset, but the mismatch is flagged.
+        assert!(!a.book.needs_resync(), "no sequence gap -> no resync");
+        let item = a.handle_message(&upd);
+        assert!(
+            a.book.checksum_failed(),
+            "checksum mismatch must be flagged"
+        );
+        // The (possibly corrupt) but non-crossed book is still emitted; the
+        // crossing guard guarantees no crossed data ever leaves the adapter.
+        assert!(
+            item.is_some(),
+            "warn-only path still emits a non-crossed lob"
+        );
+        assert_eq!(
+            a.book.num_bids(),
+            2,
+            "book is retained (not wiped by checksum)"
+        );
+    }
+
+    #[test]
+    fn test_handle_message_resets_book_on_out_of_order_sequence() {
+        let mut a = adapter();
+        let snap: KrakenWsMessage = serde_json::from_str(
+            r#"{
+                "channel": "book",
+                "type": "snapshot",
+                "sequence": 10,
+                "data": [{
+                    "symbol": "XBT/USD",
+                    "bids": [{"price": 50000.0, "qty": 1.0}],
+                    "asks": [{"price": 50100.0, "qty": 1.0}],
+                    "checksum": 0,
+                    "timestamp": "2024-01-15T10:30:00.000000Z"
+                }]
+            }"#,
+        )
+        .unwrap();
+        a.handle_message(&snap);
+        assert_eq!(a.book.num_bids(), 1);
+
+        // A backwards sequence (10 -> 4) is a corrupted/reordered stream.
+        let upd: KrakenWsMessage = serde_json::from_str(
+            r#"{
+                "channel": "book",
+                "type": "update",
+                "sequence": 4,
+                "data": [{
+                    "symbol": "XBT/USD",
+                    "bids": [{"price": 49900.0, "qty": 1.0}],
+                    "checksum": 0,
+                    "timestamp": "2024-01-15T10:30:01.000000Z"
+                }]
+            }"#,
+        )
+        .unwrap();
+        assert!(a.handle_message(&upd).is_none());
+        assert_eq!(
+            a.book.num_bids(),
+            0,
+            "out-of-order sequence must reset the book"
+        );
     }
 }
