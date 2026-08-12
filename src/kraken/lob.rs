@@ -41,6 +41,12 @@ pub struct OrderBook {
     /// Defaults to `false` to prevent an exchange feed from spoofing log lines
     /// via the exchange-supplied checksum value interpolated into the warning.
     checksum_log: bool,
+    /// When `true`, crossing-guard `warn!` logs (a level that would cross the
+    /// book) are emitted even at the default log level. The crossing guard
+    /// **always** drops the offending level regardless of this setting; see
+    /// [`should_log_crossing`](Self::should_log_crossing) and
+    /// [`OrderBook::apply_update`]. Mirrors `checksum_log` (ADR-021).
+    crossguard_log: bool,
 }
 
 /// A raw price level from Kraken: (price, size).
@@ -84,6 +90,7 @@ impl OrderBook {
             needs_resync: false,
             checksum_failed: false,
             checksum_log: false,
+            crossguard_log: false,
         }
     }
 
@@ -192,10 +199,15 @@ impl OrderBook {
                         if let Some(best_ask) = self.best_ask()
                             && price >= best_ask
                         {
-                            warn!(
-                                "[kraken] rejecting bid update at {:.2} >= best ask {:.2} (cross guard)",
-                                price, best_ask
-                            );
+                            if Self::should_log_crossing(
+                                self.crossguard_log,
+                                log::log_enabled!(log::Level::Debug),
+                            ) {
+                                warn!(
+                                    "[kraken] rejecting bid update at {:.2} >= best ask {:.2} (cross guard)",
+                                    price, best_ask
+                                );
+                            }
                             continue;
                         }
                         self.bids.insert(Reverse(OrderedFloat(price)), amount);
@@ -209,10 +221,15 @@ impl OrderBook {
                         if let Some(best_bid) = self.best_bid()
                             && price <= best_bid
                         {
-                            warn!(
-                                "[kraken] rejecting ask update at {:.2} <= best bid {:.2} (cross guard)",
-                                price, best_bid
-                            );
+                            if Self::should_log_crossing(
+                                self.crossguard_log,
+                                log::log_enabled!(log::Level::Debug),
+                            ) {
+                                warn!(
+                                    "[kraken] rejecting ask update at {:.2} <= best bid {:.2} (cross guard)",
+                                    price, best_bid
+                                );
+                            }
                             continue;
                         }
                         self.asks.insert(OrderedFloat(price), amount);
@@ -233,10 +250,13 @@ impl OrderBook {
         if let (Some(b), Some(a)) = (self.best_bid(), self.best_ask())
             && b >= a
         {
-            warn!(
-                "[kraken] detected crossed book (bid {:.2} >= ask {:.2}); clearing stale book",
-                b, a
-            );
+            if Self::should_log_crossing(self.crossguard_log, log::log_enabled!(log::Level::Debug))
+            {
+                warn!(
+                    "[kraken] detected crossed book (bid {:.2} >= ask {:.2}); clearing stale book",
+                    b, a
+                );
+            }
             self.bids.clear();
             self.asks.clear();
         }
@@ -337,6 +357,37 @@ impl OrderBook {
         checksum_log || debug_enabled
     }
 
+    /// Enable or disable `warn!`-level logging of crossing-guard rejections
+    /// (an update whose price would cross the book: ask ≤ best bid or
+    /// bid ≥ best ask).
+    ///
+    /// The crossing guard **always** drops the offending level regardless of
+    /// this setting; only the diagnostic `warn!` is gated. When disabled (the
+    /// default) rejections are still surfaced at `DEBUG` (see
+    /// [`should_log_crossing`](Self::should_log_crossing)).
+    ///
+    /// Gating prevents the feed from generating noisy/spoofed log lines via the
+    /// exchange-controlled update price interpolated into the warning.
+    pub fn set_crossguard_log(&mut self, enabled: bool) {
+        self.crossguard_log = enabled;
+    }
+
+    /// Whether crossing-guard rejection warnings are opted into for this book
+    /// (regardless of the runtime log level). Defaults to `false`.
+    pub fn crossguard_log(&self) -> bool {
+        self.crossguard_log
+    }
+
+    /// Decide whether a crossing-guard rejection should be logged.
+    ///
+    /// A rejection is surfaced at `warn!` only when the operator explicitly
+    /// opted in via `crossguard_log` **or** the runtime log level is `DEBUG`.
+    /// Keeping this a pure function of its two inputs makes the gating policy
+    /// unit-testable. The underlying reject/drop behavior is unconditional.
+    pub fn should_log_crossing(crossguard_log: bool, debug_enabled: bool) -> bool {
+        crossguard_log || debug_enabled
+    }
+
     /// Compare the local CRC32 of the top-10 levels against the
     /// exchange-supplied `checksum`. Returns `true` on match (or when the
     /// exchange sent no checksum). On mismatch a warning is logged and
@@ -414,6 +465,7 @@ impl OrderBook {
         self.needs_resync = false;
         self.checksum_failed = false;
     }
+
     fn total_bid_size(&self) -> f64 {
         self.bids.values().sum()
     }
@@ -1152,5 +1204,118 @@ mod tests {
         assert!(book.checksum_log());
         book.set_checksum_log(false);
         assert!(!book.checksum_log());
+    }
+
+    // ------------------------------------------------------------------
+    // crossguard_log gating: the crossing-guard `warn!` is opt-in (or
+    // surfaced at DEBUG), but the *reject/drop behavior* is always on.
+    // Mirrors should_log_mismatch / checksum_log (ADR-021).
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_should_log_crossing_gating() {
+        // A crossing rejection is surfaced at warn! only when the operator
+        // opted in via `crossguard_log` OR the runtime log level is DEBUG.
+        assert!(
+            !OrderBook::should_log_crossing(false, false),
+            "default (no opt-in, no debug) must stay silent"
+        );
+        assert!(
+            OrderBook::should_log_crossing(true, false),
+            "crossguard_log opt-in must surface the rejection"
+        );
+        assert!(
+            OrderBook::should_log_crossing(false, true),
+            "DEBUG log level must surface the rejection"
+        );
+        assert!(
+            OrderBook::should_log_crossing(true, true),
+            "crossguard_log + DEBUG must surface the rejection"
+        );
+    }
+
+    #[test]
+    fn test_crossguard_log_setter_and_getter() {
+        let mut book = OrderBook::new();
+        assert!(!book.crossguard_log(), "defaults to false");
+        book.set_crossguard_log(true);
+        assert!(book.crossguard_log());
+        book.set_crossguard_log(false);
+        assert!(!book.crossguard_log());
+    }
+
+    #[test]
+    fn test_crossing_guard_rejects_bid_regardless_of_log() {
+        // best ask is 50100; a bid at 50200 would cross and must be rejected
+        // (dropped) whether or not crossguard_log is enabled. Only the warn!
+        // is gated — the reject is unconditional.
+        for crossguard_log in [false, true] {
+            let mut book = OrderBook::new();
+            book.set_crossguard_log(crossguard_log);
+            book.apply_snapshot(&[(49900.0, 1.0)], Side::Bid);
+            book.apply_snapshot(&[(50100.0, 1.0)], Side::Ask);
+
+            book.apply_update(&[(50200.0, 5.0)], Side::Bid);
+
+            assert!(
+                book.best_bid().map(|b| b <= 50100.0).unwrap_or(true),
+                "best bid must not exceed best ask after crossed bid (crossguard_log={crossguard_log}), \
+                 but best_bid={:?} best_ask={:?}",
+                book.best_bid(),
+                book.best_ask()
+            );
+            // The crossed level must never have been inserted.
+            assert!(
+                !book.bids.contains_key(&Reverse(OrderedFloat(50200.0))),
+                "crossed bid level must be rejected from memory (crossguard_log={crossguard_log})"
+            );
+        }
+    }
+
+    #[test]
+    fn test_crossing_guard_rejects_ask_regardless_of_log() {
+        // best bid is 50000; an ask at 49950 would cross and must be rejected
+        // (dropped) whether or not crossguard_log is enabled.
+        for crossguard_log in [false, true] {
+            let mut book = OrderBook::new();
+            book.set_crossguard_log(crossguard_log);
+            book.apply_snapshot(&[(50000.0, 1.0)], Side::Bid);
+            book.apply_snapshot(&[(50100.0, 1.0)], Side::Ask);
+
+            book.apply_update(&[(49950.0, 5.0)], Side::Ask);
+
+            assert!(
+                book.best_ask().map(|a| a >= 50000.0).unwrap_or(true),
+                "best ask must not fall below best bid after crossed ask (crossguard_log={crossguard_log}), \
+                 but best_bid={:?} best_ask={:?}",
+                book.best_bid(),
+                book.best_ask()
+            );
+            assert!(
+                !book.asks.contains_key(&OrderedFloat(49950.0)),
+                "crossed ask level must be rejected from memory (crossguard_log={crossguard_log})"
+            );
+        }
+    }
+
+    #[test]
+    fn test_repair_crossing_clears_book_when_logging_disabled() {
+        // When the book is already crossed (e.g. from a partial snapshot),
+        // repair_crossing must still clear it unconditionally — logging state
+        // must not affect the repair behavior. Construct the crossed state
+        // directly (apply_snapshot would itself call repair_crossing and clear
+        // it before we can observe the pre-repair state).
+        let mut book = OrderBook::new();
+        book.set_crossguard_log(false);
+        book.bids.insert(Reverse(OrderedFloat(50100.0)), 1.0);
+        book.asks.insert(OrderedFloat(50000.0), 1.0);
+        // book is now crossed: best bid 50100 >= best ask 50000
+        assert_eq!(book.best_bid(), Some(50100.0));
+        assert_eq!(book.best_ask(), Some(50000.0));
+        book.repair_crossing();
+        assert!(
+            book.bids.is_empty() && book.asks.is_empty(),
+            "repair_crossing must clear a crossed book even when crossguard_log is disabled"
+        );
     }
 }

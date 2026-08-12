@@ -209,6 +209,16 @@ pub struct DataSourceConfig {
     /// lines that interpolate an exchange-controlled checksum value.
     #[serde(default)]
     pub checksum_log: bool,
+    /// When `true`, log `[kraken]` crossing-guard rejection warnings (an update
+    /// whose price would cross the book: ask ≤ best bid or bid ≥ best ask) at
+    /// `warn!` even at the default log level (Kraken only). When `false` (the
+    /// default), such rejections are only logged when the runtime log level is
+    /// `DEBUG`. The crossing guard **always** drops the crossed level
+    /// regardless of this setting — only the diagnostic `warn!` is gated.
+    /// Gating prevents the feed from generating noisy/spoofed log lines via the
+    /// exchange-controlled update price; see [ADR-021](docs/adr/Operations/ADR-021-20260812-gate-checksum-mismatch-logging-prevent-log-spoofing.md).
+    #[serde(default)]
+    pub crossguard_log: bool,
     /// Reconnection/backoff settings.
     #[serde(default)]
     pub resilience: ResilienceConfig,
@@ -310,6 +320,7 @@ impl Default for DataSourceConfig {
             max_level: None,
             max_level_pct: 0.0,
             checksum_log: false,
+            crossguard_log: false,
             resilience: ResilienceConfig::default(),
             fallback: HashMap::new(),
             api_key: None,
@@ -639,6 +650,43 @@ mod tests {
         assert!(
             cfg.checksum_log,
             "checksum_log: true must deserialize to true"
+        );
+    }
+
+    #[test]
+    fn test_data_source_config_crossguard_log_default_false() {
+        let cfg = DataSourceConfig::default();
+        assert!(!cfg.crossguard_log, "crossguard_log must default to false");
+    }
+
+    #[test]
+    fn test_data_source_config_crossguard_log_deserialize_omitted_is_false() {
+        let json = r#"{
+            "exchange": "okx",
+            "region": "global",
+            "instrument": "BTC-USDT",
+            "data_kind": "Lob"
+        }"#;
+        let cfg: DataSourceConfig = serde_json::from_str(json).unwrap();
+        assert!(
+            !cfg.crossguard_log,
+            "omitted crossguard_log must deserialize to false"
+        );
+    }
+
+    #[test]
+    fn test_data_source_config_crossguard_log_deserialize_true() {
+        let json = r#"{
+            "exchange": "okx",
+            "region": "global",
+            "instrument": "BTC-USDT",
+            "data_kind": "Lob",
+            "crossguard_log": true
+        }"#;
+        let cfg: DataSourceConfig = serde_json::from_str(json).unwrap();
+        assert!(
+            cfg.crossguard_log,
+            "crossguard_log: true must deserialize to true"
         );
     }
 }

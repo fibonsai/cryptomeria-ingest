@@ -43,6 +43,7 @@ pub struct KrakenAdapter {
     pub max_level: Option<usize>,
     pub data_kind: DataKind,
     pub checksum_log: bool,
+    pub crossguard_log: bool,
     book: OrderBook,
     prev_lob: Option<LobItem>,
 }
@@ -55,9 +56,11 @@ impl KrakenAdapter {
         max_level: Option<usize>,
         data_kind: DataKind,
         checksum_log: bool,
+        crossguard_log: bool,
     ) -> Self {
         let mut book = OrderBook::new();
         book.set_checksum_log(checksum_log);
+        book.set_crossguard_log(crossguard_log);
         Self {
             instrument,
             region,
@@ -66,6 +69,7 @@ impl KrakenAdapter {
             max_level,
             data_kind,
             checksum_log,
+            crossguard_log,
             book,
             prev_lob: None,
         }
@@ -244,6 +248,7 @@ mod tests {
             None,
             DataKind::LOB | DataKind::TRADE,
             false,
+            false,
         )
     }
 
@@ -255,6 +260,7 @@ mod tests {
             None,
             data_kind,
             false,
+            false,
         )
     }
 
@@ -265,6 +271,7 @@ mod tests {
             max_level_pct,
             max_level,
             DataKind::LOB,
+            false,
             false,
         )
     }
@@ -333,6 +340,7 @@ mod tests {
             None,
             DataKind::LOB,
             true,
+            false,
         );
         assert!(
             on.checksum_log,
@@ -345,6 +353,7 @@ mod tests {
             0.0,
             None,
             DataKind::LOB,
+            false,
             false,
         );
         assert!(!off.checksum_log, "checksum_log=false by default");
