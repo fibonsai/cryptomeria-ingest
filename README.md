@@ -94,6 +94,7 @@ Configuration for a single market data stream.
 | `data_kind` | `DataKind` | Set of `LOB` and/or `TRADE` (use `|` for both) |
 | `max_level` | `Option<usize>` | Maximum number of price levels per side (`None` = no limit) |
 | `max_level_pct` | `f64` | Maximum percentage from best price (e.g., `1.0` for ±1%). Values of `0`, `100`, or unset are treated as `100` (no filtering) |
+| `checksum_log` | `bool` | When `true`, log `[kraken]` checksum mismatch warnings (Kraken only). Defaults to `false`; mismatches are also logged at `DEBUG`. The `checksum_failed` observability flag is always set. See [ADR-021](docs/adr/Operations/ADR-021-20260812-gate-checksum-mismatch-logging-prevent-log-spoofing.md). |
 | `resilience` | `ResilienceConfig` | Reconnection/backoff/heartbeat settings |
 | `api_key` | `Option<String>` | API key for exchanges requiring WS authentication (Bitvavo); ignored otherwise |
 | `api_secret` | `Option<String>` | API secret for exchanges requiring WS authentication (Bitvavo); ignored otherwise |

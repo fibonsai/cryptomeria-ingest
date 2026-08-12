@@ -21,6 +21,7 @@ fn kraken_adapter_subscribe_msgs_covers_book_and_trade() {
         0.0,
         None,
         DataKind::LOB | DataKind::TRADE,
+        false,
     );
     let msgs = adapter.subscribe_msgs();
     assert_eq!(msgs.len(), 2);
@@ -41,6 +42,7 @@ fn kraken_adapter_subscribe_msgs_lob_only() {
         0.0,
         None,
         DataKind::LOB,
+        false,
     );
     let msgs = adapter.subscribe_msgs();
     assert_eq!(msgs.len(), 1);
@@ -56,6 +58,7 @@ fn kraken_adapter_subscribe_msgs_trade_only() {
         0.0,
         None,
         DataKind::TRADE,
+        false,
     );
     let msgs = adapter.subscribe_msgs();
     assert_eq!(msgs.len(), 1);
@@ -71,6 +74,7 @@ fn kraken_url_for_region() {
         0.0,
         None,
         DataKind::LOB | DataKind::TRADE,
+        false,
     );
     assert!(adapter.url().contains("wss://"));
 }
@@ -83,6 +87,7 @@ fn kraken_trade_seq_id_from_trade_id() {
         0.0,
         None,
         DataKind::LOB | DataKind::TRADE,
+        false,
     );
     // Realistic Kraken WS v2 `trade` channel push: there is NO top-level
     // `sequence` field on trade messages (it only exists on the book channel).

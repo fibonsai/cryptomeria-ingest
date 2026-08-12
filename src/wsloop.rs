@@ -836,6 +836,7 @@ mod tests {
                 ..Default::default()
             },
             alias: None,
+            checksum_log: false,
             fallback: HashMap::new(),
             api_key: None,
             api_secret: None,
@@ -882,6 +883,7 @@ mod tests {
                 ..Default::default()
             },
             alias: None,
+            checksum_log: false,
             fallback: HashMap::new(),
             api_key: None,
             api_secret: None,

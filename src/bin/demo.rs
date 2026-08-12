@@ -36,6 +36,10 @@ struct Cli {
     max_level: Option<usize>,
     #[clap(long)]
     max_level_pct: Option<f64>,
+    /// When set, emit `[kraken] checksum mismatch` warnings (otherwise only
+    /// logged when the log level is DEBUG). Prevents exchange-feed log spoofing.
+    #[clap(long, default_value_t = false)]
+    checksum_log: bool,
     #[clap(flatten)]
     resilience: ResilienceCli,
 }
@@ -117,6 +121,7 @@ async fn main() {
             fallback: HashMap::new(),
             api_key: cli.api_key,
             api_secret: cli.api_secret,
+            checksum_log: cli.checksum_log,
         }
     };
 
