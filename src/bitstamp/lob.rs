@@ -32,6 +32,12 @@ pub struct OrderInfo {
 }
 
 /// In-memory order book for Bitstamp.
+///
+/// This book stores **every** order and aggregated level received from the
+/// exchange WebSocket — complete snapshots plus all incremental updates — with
+/// no pre-filtering. The configured filters (`max_level`, `max_level_pct`) are
+/// applied only when [`to_lob_item`](OrderBook::to_lob_item) produces a
+/// `LobItem` for the stream.
 #[derive(Debug, Clone)]
 pub struct OrderBook {
     /// Individual order tracking.
@@ -160,6 +166,8 @@ impl OrderBook {
         }
     }
 
+    /// Process a Bitstamp WebSocket message, applying ALL levels to the
+    /// in-memory book without any pre-filtering.
     pub fn process_msg(&mut self, msg: &BitstampWsMessage) {
         let data = match msg.data.as_ref() {
             Some(d) => d,
@@ -262,8 +270,21 @@ impl OrderBook {
 
     /// Create a LobItem with post-filtering applied.
     ///
+    /// Create a LobItem containing **all** in-memory levels — no filtering.
+    ///
+    /// Guaranteed to return every level received from the WebSocket and stored
+    /// via `process_msg` / `apply_orderbook` / `apply_order`. Filtering by
+    /// `max_level` / `max_level_pct` is applied only in [`to_lob_item`].
+    pub fn full_lob_item(&self, ts: u64, exchange: &str) -> Option<LobItem> {
+        self.to_lob_item(ts, exchange, None, 0.0)
+    }
+
     /// Applies max_level and max_level_pct filters, sorts bids ascending (worst to best,
     /// so best_bid is last element) and asks ascending (best to worst, so best_ask is first element).
+    ///
+    /// **Guarantee:** calling this method does **not** mutate the in-memory order book.
+    /// The book retains all levels received from the WebSocket; only the returned
+    /// `LobItem` is filtered.
     pub fn to_lob_item(
         &self,
         ts: u64,
@@ -815,5 +836,134 @@ mod tests {
         let lob = book.to_lob_item(0, "test", None, 150.0).unwrap();
         assert_eq!(lob.bids.len(), 2, "pct=150.0 should keep all bids");
         assert_eq!(lob.asks.len(), 1);
+    }
+
+    // ------------------------------------------------------------------
+    // Guarantee: in-memory OrderBook retains ALL levels from every WS
+    // message. Filtering happens ONLY in to_lob_item / full_lob_item.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_full_lob_item_returns_all_levels() {
+        let mut book = OrderBook::new();
+        let ob = OrderBookData {
+            bids: vec![
+                vec!["100.0".into(), "1.0".into()],
+                vec!["99.0".into(), "2.0".into()],
+                vec!["98.0".into(), "3.0".into()],
+                vec!["97.0".into(), "4.0".into()],
+            ],
+            asks: vec![
+                vec!["101.0".into(), "1.0".into()],
+                vec!["102.0".into(), "2.0".into()],
+                vec!["103.0".into(), "3.0".into()],
+                vec!["104.0".into(), "4.0".into()],
+            ],
+            timestamp: "0".to_string(),
+            microtimestamp: "0".to_string(),
+        };
+        book.apply_orderbook(&ob);
+        let lob = book.full_lob_item(0, "bitstamp").unwrap();
+        assert_eq!(
+            lob.bids.len(),
+            4,
+            "full_lob_item must return ALL 4 bid levels (no filtering)"
+        );
+        assert_eq!(
+            lob.asks.len(),
+            4,
+            "full_lob_item must return ALL 4 ask levels (no filtering)"
+        );
+    }
+
+    #[test]
+    fn test_memory_retains_all_levels_after_filtered_lob_item() {
+        let mut book = OrderBook::new();
+        let ob = OrderBookData {
+            bids: vec![
+                vec!["100.0".into(), "1.0".into()],
+                vec!["99.0".into(), "2.0".into()],
+                vec!["98.0".into(), "3.0".into()],
+                vec!["97.0".into(), "4.0".into()],
+            ],
+            asks: vec![
+                vec!["101.0".into(), "1.0".into()],
+                vec!["102.0".into(), "2.0".into()],
+                vec!["103.0".into(), "3.0".into()],
+                vec!["104.0".into(), "4.0".into()],
+            ],
+            timestamp: "0".to_string(),
+            microtimestamp: "0".to_string(),
+        };
+        book.apply_orderbook(&ob);
+        // to_lob_item with max_level=1 must produce a 1-level lob...
+        let lob = book.to_lob_item(0, "bitstamp", Some(1), 0.0).unwrap();
+        assert_eq!(lob.bids.len(), 1, "filtered lob should have 1 bid");
+        assert_eq!(lob.asks.len(), 1, "filtered lob should have 1 ask");
+        // ...but the in-memory book must STILL contain all 4 levels.
+        assert_eq!(book.num_bids(), 4, "memory book must retain all 4 bids");
+        assert_eq!(book.num_asks(), 4, "memory book must retain all 4 asks");
+    }
+
+    #[test]
+    fn test_full_lob_item_equals_unfiltered_to_lob_item() {
+        let mut book = OrderBook::new();
+        let ob = OrderBookData {
+            bids: vec![
+                vec!["100.0".into(), "1.0".into()],
+                vec!["99.0".into(), "2.0".into()],
+                vec!["98.0".into(), "3.0".into()],
+            ],
+            asks: vec![
+                vec!["101.0".into(), "1.0".into()],
+                vec!["102.0".into(), "2.0".into()],
+                vec!["103.0".into(), "3.0".into()],
+            ],
+            timestamp: "0".to_string(),
+            microtimestamp: "0".to_string(),
+        };
+        book.apply_orderbook(&ob);
+        let full = book.full_lob_item(0, "bitstamp").unwrap();
+        let unfiltered = book.to_lob_item(0, "bitstamp", None, 0.0).unwrap();
+        assert_eq!(full.bids.len(), unfiltered.bids.len());
+        assert_eq!(full.asks.len(), unfiltered.asks.len());
+        for (a, b) in full.bids.iter().zip(unfiltered.bids.iter()) {
+            assert_eq!(a.price, b.price);
+            assert_eq!(a.size, b.size);
+        }
+        for (a, b) in full.asks.iter().zip(unfiltered.asks.iter()) {
+            assert_eq!(a.price, b.price);
+            assert_eq!(a.size, b.size);
+        }
+    }
+
+    #[test]
+    fn test_to_lob_item_with_filter_returns_fewer_levels_than_full() {
+        let mut book = OrderBook::new();
+        let ob = OrderBookData {
+            bids: vec![
+                vec!["100.0".into(), "1.0".into()],
+                vec!["99.0".into(), "2.0".into()],
+                vec!["98.0".into(), "3.0".into()],
+                vec!["97.0".into(), "4.0".into()],
+                vec!["96.0".into(), "5.0".into()],
+            ],
+            asks: vec![
+                vec!["101.0".into(), "1.0".into()],
+                vec!["102.0".into(), "2.0".into()],
+                vec!["103.0".into(), "3.0".into()],
+                vec!["104.0".into(), "4.0".into()],
+                vec!["105.0".into(), "5.0".into()],
+            ],
+            timestamp: "0".to_string(),
+            microtimestamp: "0".to_string(),
+        };
+        book.apply_orderbook(&ob);
+        let full = book.full_lob_item(0, "bitstamp").unwrap();
+        let filtered = book.to_lob_item(0, "bitstamp", Some(2), 0.0).unwrap();
+        assert_eq!(full.bids.len(), 5, "memory has 5 bids");
+        assert_eq!(filtered.bids.len(), 2, "filtered lob has 2 bids");
+        assert_eq!(full.asks.len(), 5, "memory has 5 asks");
+        assert_eq!(filtered.asks.len(), 2, "filtered lob has 2 asks");
     }
 }

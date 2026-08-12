@@ -136,7 +136,10 @@ enum MarketDataItem {
 
 #### `LobItem`
 
-Limit Order Book snapshot or incremental update.
+Limit Order Book snapshot — a filtered view of the in-memory book at a point in time.
+The first `LobItem` is a full snapshot of the (filtered) book; subsequent items are
+full snapshots after each update. The in-memory order book always retains **all** levels;
+`max_level` / `max_level_pct` filtering is applied only here, at emission time.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -173,7 +176,7 @@ Trade execution.
 The main entry point. Returns a stream of market data results.
 
 - **First `LobItem`**: Always a full snapshot (if `data_kind` includes `LOB`)
-- **Subsequent `LobItem`**: Incremental updates (post-filtered by `max_level`/`max_level_pct`)
+- **Subsequent `LobItem`**: Full snapshot of the filtered book after each update (post-filtered by `max_level`/`max_level_pct`). The in-memory book retains all levels — filtering is applied only at emission.
 - **Stream ends**: On fatal error (max reconnect attempts exceeded) or when the stream is dropped
 - **Errors**: Wrapped in `IngestError` (config, connection, parse, etc.)
 
@@ -739,8 +742,30 @@ The shared logic that handles:
    channels continue independently.
 10. The first `LobItem` on the LOB channel (if `data_kind` includes `LOB`) is always a
     full snapshot.
+11. Each `LobItem` forwarded to the stream is a full snapshot of the **filtered** book
+    (after applying `max_level` / `max_level_pct`). The in-memory order book always
+    retains **all** levels from the WebSocket — filtering is applied only at emission
+    time. See [Full LOB in Memory vs. Filtered Stream](#full-lob-in-memory-vs-filtered-stream)
+    below.
 
 The public `stream()` return type is unchanged — callers still see a single merged stream.
+
+### Full LOB in Memory vs. Filtered Stream
+
+The library guarantees that **every** level from every WebSocket snapshot and update is
+stored in the in-memory order book — no pre-filtering is ever applied during message
+processing. The configured filters (`max_level` and `max_level_pct`) are applied **only**
+when the book is converted to a `LobItem` for the stream (via `to_lob_item` / `emit_lob`),
+and this conversion never mutates the book.
+
+| Path | Filtering | What it contains |
+|------|-----------|-----------------|
+| **In-memory `OrderBook`** | None | All bids and asks from every WS snapshot + update |
+| **Stream `LobItem`** | `max_level` / `max_level_pct` | Filtered copy of the current book state |
+| **`OrderBook::full_lob_item`** | None | All in-memory levels (same as `to_lob_item(None, 0.0)`) |
+
+Each exchange's `OrderBook` exposes `num_bids()` / `num_asks()` and `full_lob_item()` so
+callers (and tests) can inspect the full, unfiltered book at any time.
 
 ### Testing
 

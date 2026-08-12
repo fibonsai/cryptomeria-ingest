@@ -22,8 +22,22 @@ impl MarketDataItem {
     }
 }
 
-/// Normalized LOB item — first item per `stream()` is a full snapshot,
-/// subsequent items are post-filter increments.
+/// Normalized LOB item forwarded to the stream.
+///
+/// Each exchange adapter maintains an **in-memory order book** that stores every
+/// level received from the WebSocket (full snapshots + all incremental updates).
+/// This method is the only place where the configured filters (`max_level`,
+/// `max_level_pct`) are applied — the book itself is never trimmed.
+///
+/// - The **first** `LobItem` per stream is a full snapshot of the (filtered)
+///   book.
+/// - **Subsequent** `LobItem`s are also full snapshots of the (filtered) book
+///   after each update — i.e. the entire visible book is re-emitted, not just
+///   the changed levels.
+///
+/// Use [`crate::okx::lob::OrderBook::full_lob_item`] (or the equivalent on
+/// another exchange's `OrderBook`) to obtain the complete, unfiltered book when
+/// needed for validation, debugging, or replay.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LobItem {
     /// Exchange timestamp in milliseconds since epoch.
