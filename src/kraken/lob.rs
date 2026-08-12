@@ -35,6 +35,12 @@ pub struct OrderBook {
     /// Observability flag set when the last `verify_checksum` detected a
     /// mismatch. Does not by itself drop the book.
     checksum_failed: bool,
+    /// When `true`, a CRC32 checksum mismatch is logged at `warn!` even at the
+    /// default log level. The mismatch is *also* logged when the runtime log
+    /// level is `DEBUG` (see [`should_log_mismatch`](Self::should_log_mismatch)).
+    /// Defaults to `false` to prevent an exchange feed from spoofing log lines
+    /// via the exchange-supplied checksum value interpolated into the warning.
+    checksum_log: bool,
 }
 
 /// A raw price level from Kraken: (price, size).
@@ -77,6 +83,7 @@ impl OrderBook {
             last_sequence: None,
             needs_resync: false,
             checksum_failed: false,
+            checksum_log: false,
         }
     }
 
@@ -301,6 +308,35 @@ impl OrderBook {
         self.last_sequence = Some(seq);
     }
 
+    /// Enable or disable `warn!`-level logging of CRC32 checksum mismatches.
+    ///
+    /// Even when logging is disabled, mismatches are still recorded in
+    /// [`checksum_failed`](Self::checksum_failed) and surfaced at `DEBUG` (see
+    /// [`should_log_mismatch`](Self::should_log_mismatch)).
+    pub fn set_checksum_log(&mut self, enabled: bool) {
+        self.checksum_log = enabled;
+    }
+
+    /// Whether CRC32 mismatch warnings are opted into for this book
+    /// (regardless of the runtime log level). Defaults to `false`.
+    pub fn checksum_log(&self) -> bool {
+        self.checksum_log
+    }
+
+    /// Decide whether a CRC32 checksum mismatch should be logged.
+    ///
+    /// A mismatch is surfaced only when the operator explicitly opted in via
+    /// `checksum_log` **or** the runtime log level is `DEBUG`. Keeping this a pure
+    /// function of its two inputs makes the gating policy unit-testable.
+    ///
+    /// Silence-by-default prevents an exchange feed from spoofing log lines
+    /// through the exchange-supplied checksum value interpolated into the
+    /// warning; the always-on `checksum_failed` flag remains the programmatic
+    /// integrity signal.
+    pub fn should_log_mismatch(checksum_log: bool, debug_enabled: bool) -> bool {
+        checksum_log || debug_enabled
+    }
+
     /// Compare the local CRC32 of the top-10 levels against the
     /// exchange-supplied `checksum`. Returns `true` on match (or when the
     /// exchange sent no checksum). On mismatch a warning is logged and
@@ -320,10 +356,12 @@ impl OrderBook {
         }
         let computed = self.compute_checksum(10);
         if (computed as i64) != checksum {
-            warn!(
-                "[kraken] checksum mismatch: local {} != exchange {} (sequence continuity is the authoritative resync signal)",
-                computed, checksum
-            );
+            if Self::should_log_mismatch(self.checksum_log, log::log_enabled!(log::Level::Debug)) {
+                warn!(
+                    "[kraken] checksum mismatch: local {} != exchange {} (sequence continuity is the authoritative resync signal)",
+                    computed, checksum
+                );
+            }
             self.checksum_failed = true;
             return false;
         }
@@ -1066,5 +1104,53 @@ mod tests {
         assert!(book.best_bid().is_none());
         assert!(!book.needs_resync());
         assert!(!book.checksum_failed(), "reset must clear checksum_failed");
+    }
+
+    #[test]
+    fn test_should_log_mismatch_gating() {
+        // A mismatch is surfaced only when the operator opted in via
+        // `checksum_log` OR the runtime log level is (at least) DEBUG.
+        assert!(
+            !OrderBook::should_log_mismatch(false, false),
+            "default (no opt-in, no debug) must stay silent: log-spoofing prevention"
+        );
+        assert!(
+            OrderBook::should_log_mismatch(true, false),
+            "checksum_log opt-in must surface the mismatch"
+        );
+        assert!(
+            OrderBook::should_log_mismatch(false, true),
+            "DEBUG log level must surface the mismatch"
+        );
+        assert!(
+            OrderBook::should_log_mismatch(true, true),
+            "checksum_log + DEBUG must surface the mismatch"
+        );
+    }
+
+    #[test]
+    fn test_checksum_mismatch_flags_regardless_of_logging() {
+        // The checksum_failed observability flag must be set on a mismatch even
+        // when logging is suppressed (no opt-in, no DEBUG) — the programmatic
+        // signal is independent of the (spoof-resistant) log path.
+        let mut book = OrderBook::new();
+        book.apply_snapshot(&[(50000.0, 1.0)], Side::Bid);
+        book.apply_snapshot(&[(50100.0, 1.0)], Side::Ask);
+        let computed = book.compute_checksum(10);
+        assert!(!book.verify_checksum((computed as i64).wrapping_add(1)));
+        assert!(
+            book.checksum_failed(),
+            "mismatch must flag checksum_failed even when not logging"
+        );
+    }
+
+    #[test]
+    fn test_checksum_log_setter_and_getter() {
+        let mut book = OrderBook::new();
+        assert!(!book.checksum_log(), "defaults to false");
+        book.set_checksum_log(true);
+        assert!(book.checksum_log());
+        book.set_checksum_log(false);
+        assert!(!book.checksum_log());
     }
 }

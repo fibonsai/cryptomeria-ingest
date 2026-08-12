@@ -202,6 +202,13 @@ pub struct DataSourceConfig {
     /// Maximum percentage from best price (0.0 or 100.0 = no limit, all levels kept).
     #[serde(default)]
     pub max_level_pct: f64,
+    /// When `true`, emit the `[kraken] checksum mismatch` warning on a CRC32
+    /// mismatch (in addition to the always-set `checksum_failed` flag). When
+    /// `false` (the default), a mismatch is only logged when the runtime log
+    /// level is `DEBUG`. Gating this prevents an exchange feed from spoofing log
+    /// lines that interpolate an exchange-controlled checksum value.
+    #[serde(default)]
+    pub checksum_log: bool,
     /// Reconnection/backoff settings.
     #[serde(default)]
     pub resilience: ResilienceConfig,
@@ -302,6 +309,7 @@ impl Default for DataSourceConfig {
             data_kind: DataKind::empty(),
             max_level: None,
             max_level_pct: 0.0,
+            checksum_log: false,
             resilience: ResilienceConfig::default(),
             fallback: HashMap::new(),
             api_key: None,
@@ -594,6 +602,43 @@ mod tests {
         assert_eq!(
             ConfigError::MissingCredentials.to_string(),
             "bitvavo requires api_key and api_secret"
+        );
+    }
+
+    #[test]
+    fn test_data_source_config_checksum_log_default_false() {
+        let cfg = DataSourceConfig::default();
+        assert!(!cfg.checksum_log, "checksum_log must default to false");
+    }
+
+    #[test]
+    fn test_data_source_config_checksum_log_deserialize_omitted_is_false() {
+        let json = r#"{
+            "exchange": "okx",
+            "region": "global",
+            "instrument": "BTC-USDT",
+            "data_kind": "Lob"
+        }"#;
+        let cfg: DataSourceConfig = serde_json::from_str(json).unwrap();
+        assert!(
+            !cfg.checksum_log,
+            "omitted checksum_log must deserialize to false"
+        );
+    }
+
+    #[test]
+    fn test_data_source_config_checksum_log_deserialize_true() {
+        let json = r#"{
+            "exchange": "okx",
+            "region": "global",
+            "instrument": "BTC-USDT",
+            "data_kind": "Lob",
+            "checksum_log": true
+        }"#;
+        let cfg: DataSourceConfig = serde_json::from_str(json).unwrap();
+        assert!(
+            cfg.checksum_log,
+            "checksum_log: true must deserialize to true"
         );
     }
 }

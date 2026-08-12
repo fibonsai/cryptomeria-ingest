@@ -42,6 +42,7 @@ pub struct KrakenAdapter {
     pub max_level_pct: f64,
     pub max_level: Option<usize>,
     pub data_kind: DataKind,
+    pub checksum_log: bool,
     book: OrderBook,
     prev_lob: Option<LobItem>,
 }
@@ -53,7 +54,10 @@ impl KrakenAdapter {
         max_level_pct: f64,
         max_level: Option<usize>,
         data_kind: DataKind,
+        checksum_log: bool,
     ) -> Self {
+        let mut book = OrderBook::new();
+        book.set_checksum_log(checksum_log);
         Self {
             instrument,
             region,
@@ -61,7 +65,8 @@ impl KrakenAdapter {
             max_level_pct,
             max_level,
             data_kind,
-            book: OrderBook::new(),
+            checksum_log,
+            book,
             prev_lob: None,
         }
     }
@@ -238,11 +243,19 @@ mod tests {
             0.0,
             None,
             DataKind::LOB | DataKind::TRADE,
+            false,
         )
     }
 
     fn adapter_with_kind(data_kind: DataKind) -> KrakenAdapter {
-        KrakenAdapter::new("XBT/USD".into(), "global".into(), 0.0, None, data_kind)
+        KrakenAdapter::new(
+            "XBT/USD".into(),
+            "global".into(),
+            0.0,
+            None,
+            data_kind,
+            false,
+        )
     }
 
     fn adapter_with_filter(max_level: Option<usize>, max_level_pct: f64) -> KrakenAdapter {
@@ -252,6 +265,7 @@ mod tests {
             max_level_pct,
             max_level,
             DataKind::LOB,
+            false,
         )
     }
 
@@ -306,6 +320,34 @@ mod tests {
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].0, "trade");
         assert!(msgs[0].1.contains("\"trade\""));
+    }
+
+    #[test]
+    fn test_adapter_threads_checksum_log() {
+        // The opt-in flag must reach the adapter so process_msg/verify_checksum
+        // can log mismatches at warn level under either opt-in or DEBUG.
+        let on = KrakenAdapter::new(
+            "XBT/USD".into(),
+            "global".into(),
+            0.0,
+            None,
+            DataKind::LOB,
+            true,
+        );
+        assert!(
+            on.checksum_log,
+            "checksum_log=true must be retained on the adapter"
+        );
+
+        let off = KrakenAdapter::new(
+            "XBT/USD".into(),
+            "global".into(),
+            0.0,
+            None,
+            DataKind::LOB,
+            false,
+        );
+        assert!(!off.checksum_log, "checksum_log=false by default");
     }
 
     #[test]
