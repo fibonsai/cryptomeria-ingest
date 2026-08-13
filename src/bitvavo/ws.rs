@@ -276,6 +276,14 @@ impl ExchangeAdapter for BitvavoAdapter {
         matches!(msg.message_type(), MessageType::Auth | MessageType::Event)
     }
 
+    fn keepalive_interval_ms(&self) -> u64 {
+        5000
+    }
+
+    fn ping_msg(&self) -> Option<String> {
+        None
+    }
+
     fn url(&self) -> String {
         crate::urls::websocket_url(&self.region, "bitvavo").to_string()
     }
@@ -527,6 +535,18 @@ mod tests {
         )
         .unwrap();
         assert!(!a.handle_heartbeat(&msg));
+    }
+
+    #[test]
+    fn test_keepalive_interval_ms() {
+        let a = adapter();
+        assert_eq!(a.keepalive_interval_ms(), 5000);
+    }
+
+    #[test]
+    fn test_ping_msg_none() {
+        let a = adapter();
+        assert!(a.ping_msg().is_none(), "Bitvavo uses raw ws-level ping");
     }
 
     #[test]

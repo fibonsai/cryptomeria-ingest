@@ -177,6 +177,18 @@ impl ExchangeAdapter for OkxAdapter {
         matches!(msg.message_type(), MessageType::Event)
     }
 
+    fn keepalive_interval_ms(&self) -> u64 {
+        18000
+    }
+
+    fn ping_msg(&self) -> Option<String> {
+        Some(r#"{"event":"ping"}"#.to_string())
+    }
+
+    fn is_pong(&self, msg: &Self::Message) -> bool {
+        msg.event.as_deref() == Some("pong")
+    }
+
     fn url(&self) -> String {
         crate::urls::websocket_url(&self.region, "okx").to_string()
     }
@@ -296,6 +308,37 @@ mod tests {
         )
         .unwrap();
         assert!(!a.handle_heartbeat(&msg));
+    }
+
+    #[test]
+    fn test_keepalive_interval_ms() {
+        let a = adapter();
+        assert_eq!(a.keepalive_interval_ms(), 18000);
+    }
+
+    #[test]
+    fn test_ping_msg() {
+        let a = adapter();
+        let msg = a.ping_msg().expect("OKX should have an app-level ping");
+        let v: serde_json::Value = serde_json::from_str(&msg).unwrap();
+        assert_eq!(v["event"], "ping");
+    }
+
+    #[test]
+    fn test_is_pong_true_for_pong_event() {
+        let a = adapter();
+        let msg: OkxWsMessage = serde_json::from_str(r#"{"event":"pong"}"#).unwrap();
+        assert!(a.is_pong(&msg));
+    }
+
+    #[test]
+    fn test_is_pong_false_for_subscribe_event() {
+        let a = adapter();
+        let msg: OkxWsMessage = serde_json::from_str(
+            r#"{"event":"subscribe","arg":{"channel":"books","instId":"BTC-USDT"}}"#,
+        )
+        .unwrap();
+        assert!(!a.is_pong(&msg));
     }
 
     #[test]
