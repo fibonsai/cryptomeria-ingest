@@ -3,6 +3,7 @@ use crate::bitstamp::types::{
 };
 use crate::items::{LobItem, LobLevel};
 use crate::traits::{LevelsWithinPct, OrderBook as OrderBookTrait};
+use log::warn;
 use ordered_float::OrderedFloat;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap};
@@ -46,6 +47,13 @@ pub struct OrderBook {
     pub bids: BTreeMap<Reverse<OrderedFloat<f64>>, f64>,
     /// Aggregated price levels for asks (ascending iteration).
     pub asks: BTreeMap<OrderedFloat<f64>, f64>,
+    /// Set to `true` when `repair_crossing` clears a crossed book. The owning
+    /// adapter should drop all levels (`reset`) and await a fresh snapshot.
+    needs_resync: bool,
+    /// Observability flag reserved for API parity with OKX/Kraken. Bitstamp's
+    /// `diff_order_book` has no checksum field, so this is never set from a
+    /// wire value; it stays `false` and is cleared by `reset`.
+    checksum_failed: bool,
 }
 
 impl OrderBook {
@@ -54,6 +62,8 @@ impl OrderBook {
             orders: HashMap::new(),
             bids: BTreeMap::new(),
             asks: BTreeMap::new(),
+            needs_resync: false,
+            checksum_failed: false,
         }
     }
 
@@ -124,7 +134,33 @@ impl OrderBook {
                 self.rebuild_price_level(old.side, old.price);
             }
         } else {
-            // Add or update order
+            // Add or update order — crossing guard: reject a bid whose price
+            // would rise above the best ask, or an ask whose price would fall
+            // below the best bid. The guard drops the order unconditionally;
+            // warnings are gated behind DEBUG to prevent log spoofing (ADR-022).
+            if entry.is_bid() {
+                if let Some(best_ask) = self.best_ask()
+                    && price.0 >= best_ask
+                {
+                    if log::log_enabled!(log::Level::Debug) {
+                        warn!(
+                            "[bitstamp] rejecting bid order at {:.2} >= best ask {:.2} (cross guard)",
+                            price.0, best_ask
+                        );
+                    }
+                    return;
+                }
+            } else if let Some(best_bid) = self.best_bid()
+                && price.0 <= best_bid
+            {
+                if log::log_enabled!(log::Level::Debug) {
+                    warn!(
+                        "[bitstamp] rejecting ask order at {:.2} <= best bid {:.2} (cross guard)",
+                        price.0, best_bid
+                    );
+                }
+                return;
+            }
             self.orders.insert(
                 entry.id,
                 OrderInfo {
@@ -164,6 +200,53 @@ impl OrderBook {
                 }
             }
         }
+        self.repair_crossing();
+    }
+
+    /// Repair a crossed book (best bid >= best ask).
+    ///
+    /// With the per-order crossing guard in `apply_order` a cross should not
+    /// arise from individual updates; this exists as a safety net for partial
+    /// snapshots and stale reconnect state. All levels and individual orders
+    /// are cleared and the book awaits the next full snapshot.
+    fn repair_crossing(&mut self) {
+        if let (Some(b), Some(a)) = (self.best_bid(), self.best_ask())
+            && b >= a
+        {
+            if log::log_enabled!(log::Level::Debug) {
+                warn!(
+                    "[bitstamp] detected crossed book (bid {:.2} >= ask {:.2}); clearing stale book",
+                    b, a
+                );
+            }
+            self.bids.clear();
+            self.asks.clear();
+            self.orders.clear();
+            self.needs_resync = true;
+        }
+    }
+
+    /// Returns `true` when the book must be resynced (`repair_crossing` cleared
+    /// a crossed book).
+    pub fn needs_resync(&self) -> bool {
+        self.needs_resync
+    }
+
+    /// Returns `true` when the last checksum verification detected a mismatch.
+    /// Reserved for API parity with OKX/Kraken; Bitstamp has no checksum wire
+    /// field so this is always `false`.
+    pub fn checksum_failed(&self) -> bool {
+        self.checksum_failed
+    }
+
+    /// Discard all book levels, individual orders, and sync state. Called by
+    /// the adapter after `on_reconnect` and when `needs_resync` is flagged.
+    pub fn reset(&mut self) {
+        self.bids.clear();
+        self.asks.clear();
+        self.orders.clear();
+        self.needs_resync = false;
+        self.checksum_failed = false;
     }
 
     /// Process a Bitstamp WebSocket message, applying ALL levels to the
@@ -965,5 +1048,114 @@ mod tests {
         assert_eq!(filtered.bids.len(), 2, "filtered lob has 2 bids");
         assert_eq!(full.asks.len(), 5, "memory has 5 asks");
         assert_eq!(filtered.asks.len(), 2, "filtered lob has 2 asks");
+    }
+
+    // ------------------------------------------------------------------
+    // Crossing guard + repair_crossing
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_apply_order_bid_above_best_ask_rejected() {
+        let mut book = OrderBook::new();
+        let ob = OrderBookData {
+            bids: vec![vec!["100.0".into(), "1.0".into()]],
+            asks: vec![vec!["101.0".into(), "1.0".into()]],
+            timestamp: "0".to_string(),
+            microtimestamp: "0".to_string(),
+        };
+        book.apply_orderbook(&ob);
+        assert_eq!(book.num_bids(), 1);
+        assert_eq!(book.num_asks(), 1);
+
+        // A bid order at 102.0 would cross (102 >= best ask 101); must be rejected.
+        let crossed_bid = OrderEntry {
+            id: 99,
+            id_str: "99".to_string(),
+            price: "102.0".to_string(),
+            amount: "5.0".to_string(),
+            order_type: 0, // bid
+            timestamp: "0".to_string(),
+        };
+        book.apply_order(&crossed_bid);
+        assert!(
+            !book.bids.contains_key(&Reverse(OrderedFloat(102.0))),
+            "crossed bid must be rejected from memory"
+        );
+        assert_eq!(book.num_bids(), 1, "no new bid level should be added");
+    }
+
+    #[test]
+    fn test_apply_order_ask_below_best_bid_rejected() {
+        let mut book = OrderBook::new();
+        let ob = OrderBookData {
+            bids: vec![vec!["100.0".into(), "1.0".into()]],
+            asks: vec![vec!["101.0".into(), "1.0".into()]],
+            timestamp: "0".to_string(),
+            microtimestamp: "0".to_string(),
+        };
+        book.apply_orderbook(&ob);
+
+        // An ask order at 99.0 would cross (99 <= best bid 100); must be rejected.
+        let crossed_ask = OrderEntry {
+            id: 99,
+            id_str: "99".to_string(),
+            price: "99.0".to_string(),
+            amount: "5.0".to_string(),
+            order_type: 1, // ask
+            timestamp: "0".to_string(),
+        };
+        book.apply_order(&crossed_ask);
+        assert!(
+            !book.asks.contains_key(&OrderedFloat(99.0)),
+            "crossed ask must be rejected from memory"
+        );
+        assert_eq!(book.num_asks(), 1, "no new ask level should be added");
+    }
+
+    #[test]
+    fn test_repair_crossing_clears_bitstamp_book() {
+        // Construct the crossed state directly: bids 102, asks 100 (bid > ask).
+        // apply_orderbook/apply_order would call repair_crossing and clear it
+        // before we can observe the pre-repair state.
+        let mut book = OrderBook::new();
+        book.bids.insert(Reverse(OrderedFloat(102.0)), 1.0);
+        book.asks.insert(OrderedFloat(100.0), 1.0);
+        assert_eq!(book.best_bid(), Some(102.0));
+        assert_eq!(book.best_ask(), Some(100.0));
+        book.repair_crossing();
+        assert!(
+            book.bids.is_empty() && book.asks.is_empty() && book.orders.is_empty(),
+            "repair_crossing must clear a crossed book (bids+asks+orders)"
+        );
+        assert!(book.needs_resync(), "repair_crossing must set needs_resync");
+    }
+
+    #[test]
+    fn test_reset_clears_bitstamp_book() {
+        let mut book = OrderBook::new();
+        let ob = OrderBookData {
+            bids: vec![vec!["100.0".into(), "1.0".into()]],
+            asks: vec![vec!["101.0".into(), "1.0".into()]],
+            timestamp: "0".to_string(),
+            microtimestamp: "0".to_string(),
+        };
+        book.apply_orderbook(&ob);
+        assert_eq!(book.num_bids(), 1);
+        book.reset();
+        assert_eq!(book.num_bids(), 0);
+        assert_eq!(book.num_asks(), 0);
+        assert!(book.bids.is_empty());
+        assert!(book.asks.is_empty());
+        assert!(book.orders.is_empty());
+        assert!(book.best_bid().is_none());
+        assert!(!book.needs_resync());
+        assert!(!book.checksum_failed());
+    }
+
+    #[test]
+    fn test_bitstamp_needs_resync_and_checksum_failed_defaults() {
+        let book = OrderBook::new();
+        assert!(!book.needs_resync());
+        assert!(!book.checksum_failed());
     }
 }

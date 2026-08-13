@@ -94,7 +94,7 @@ Configuration for a single market data stream.
 | `data_kind` | `DataKind` | Set of `LOB` and/or `TRADE` (use `|` for both) |
 | `max_level` | `Option<usize>` | Maximum number of price levels per side (`None` = no limit) |
 | `max_level_pct` | `f64` | Maximum percentage from best price (e.g., `1.0` for ±1%). Values of `0`, `100`, or unset are treated as `100` (no filtering) |
-| `checksum_log` | `bool` | When `true`, log `[kraken]` checksum mismatch warnings (Kraken only). Defaults to `false`; mismatches are also logged at `DEBUG`. The `checksum_failed` observability flag is always set. See [ADR-021](docs/adr/Operations/ADR-021-20260812-gate-checksum-mismatch-logging-prevent-log-spoofing.md). |
+| `checksum_log` | `bool` | When `true`, log `[kraken]`/`[okx]` checksum mismatch warnings (Kraken & OKX). Defaults to `false`; mismatches are also logged at `DEBUG`. The `checksum_failed` observability flag is always set. See [ADR-021](docs/adr/Operations/ADR-021-20260812-gate-checksum-mismatch-logging-prevent-log-spoofing.md) and [ADR-022](docs/adr/Integration/ADR-022-20260812-okx-bitstamp-lob-crossing-guard-checksum-log-and-resync.md). |
 | `crossguard_log` | `bool` | When `true`, log `[kraken]` crossing-guard rejection warnings (an update whose price would cross the book: ask ≤ best bid or bid ≥ best ask, Kraken only). Defaults to `false`; crossings are also logged at `DEBUG`. The guard **always** rejects/drops the crossed level unconditionally — only the diagnostic `warn!` is gated. See [Issue #77](https://github.com/fibonsai/cryptomeria-ingest/issues/77) and [ADR-021](docs/adr/Operations/ADR-021-20260812-gate-checksum-mismatch-logging-prevent-log-spoofing.md). |
 | `resilience` | `ResilienceConfig` | Reconnection/backoff/heartbeat settings |
 | `api_key` | `Option<String>` | API key for exchanges requiring WS authentication (Bitvavo); ignored otherwise |
@@ -709,7 +709,7 @@ Each exchange adapter (`okx::ws::OkxAdapter`, `kraken::ws::KrakenAdapter`, `bits
 - `parse_message(&self, text: &str) -> Result<Self::Message, String>`: parse raw WebSocket text
 - `handle_message(&mut self, msg: &Self::Message) -> Option<MarketDataItem>`: process a parsed message, update internal state, return an item to emit
 - `handle_heartbeat(&self, msg: &Self::Message) -> bool`: whether to respond to this message as a heartbeat
-- `async on_reconnect(&self) -> Result<Vec<MarketDataItem>, String>`: optional async hook to fetch snapshot on reconnect (used by Bitstamp for the LOB channel; also overridden by Kraken, which resets its local book so the first post-reconnect snapshot re-seeds cleanly — see ADR-020)
+- `async on_reconnect(&self) -> Result<Vec<MarketDataItem>, String>`: optional async hook to fetch snapshot on reconnect (used by Bitstamp for the LOB channel; also overridden by Kraken, OKX, and Bitstamp, which reset their local books so the first post-reconnect snapshot re-seeds cleanly — see ADR-020, ADR-022)
 
 ### WebSocket Loop (`wsloop::run_exchange_stream`)
 
