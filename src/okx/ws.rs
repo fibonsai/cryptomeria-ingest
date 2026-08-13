@@ -219,12 +219,40 @@ impl ExchangeAdapter for OkxAdapter {
         18000
     }
 
+    /// OKX's V5 WebSocket API uses server-initiated ping/pong: the server
+    /// sends `{"event":"ping","ts":"<ms>"}` and expects a `{"event":"pong",
+    /// "ts":"<ms>"}` response. The client must NOT send `{"event":"ping"}` —
+    /// OKX rejects it with error 60012 ("Illegal request").
+    ///
+    /// We return `None` so the wsloop falls back to WebSocket-level
+    /// `Message::Ping` frames. Server-initiated application-level pings are
+    /// handled via [`server_ping_response`](Self::server_ping_response),
+    /// which both sends the pong reply and updates `last_pong` for liveness.
     fn ping_msg(&self) -> Option<String> {
-        Some(r#"{"event":"ping"}"#.to_string())
+        None
     }
 
     fn is_pong(&self, msg: &Self::Message) -> bool {
         msg.event.as_deref() == Some("pong")
+    }
+
+    /// Respond to OKX's server-initiated `{"event":"ping","ts":"..."}`
+    /// by echoing back `{"event":"pong","ts":"..."}`. Receiving the server's
+    /// ping is also treated as a liveness signal (the wsloop updates
+    /// `last_pong` when this returns `Some`).
+    ///
+    /// Returns `None` for all non-ping messages.
+    fn server_ping_response(&self, msg: &Self::Message) -> Option<String> {
+        if msg.event.as_deref() == Some("ping") {
+            let pong = if let Some(ref ts) = msg.ts {
+                serde_json::json!({"event": "pong", "ts": ts})
+            } else {
+                serde_json::json!({"event": "pong"})
+            };
+            Some(pong.to_string())
+        } else {
+            None
+        }
     }
 
     fn url(&self) -> String {
@@ -388,11 +416,17 @@ mod tests {
     }
 
     #[test]
-    fn test_ping_msg() {
+    fn test_ping_msg_none() {
+        // OKX's V5 WebSocket API now uses server-initiated ping/pong.
+        // Sending {"event":"ping"} as a client is rejected with error 60012
+        // ("Illegal request"), so we fall back to WebSocket-level ping frames
+        // and handle server-initiated application-level pings via
+        // `server_ping_response`.
         let a = adapter();
-        let msg = a.ping_msg().expect("OKX should have an app-level ping");
-        let v: serde_json::Value = serde_json::from_str(&msg).unwrap();
-        assert_eq!(v["event"], "ping");
+        assert!(
+            a.ping_msg().is_none(),
+            "OKX must not send client-initiated {{\"event\":\"ping\"}} (rejected with 60012)"
+        );
     }
 
     #[test]
@@ -410,6 +444,63 @@ mod tests {
         )
         .unwrap();
         assert!(!a.is_pong(&msg));
+    }
+
+    // ------------------------------------------------------------------
+    // Server-initiated ping/pong (OKX V5 feed now initiates pings;
+    // client must NOT send {"event":"ping"} — rejected with 60012)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_server_ping_response_with_ts() {
+        let a = adapter();
+        // Server sends {"event":"ping","ts":"<timestamp_ms>"}
+        let msg: OkxWsMessage =
+            serde_json::from_str(r#"{"event":"ping","ts":"1621571640"}"#).unwrap();
+        let resp = a
+            .server_ping_response(&msg)
+            .expect("server ping must produce a pong response");
+        let v: serde_json::Value = serde_json::from_str(&resp).unwrap();
+        assert_eq!(v["event"], "pong");
+        assert_eq!(v["ts"], "1621571640");
+    }
+
+    #[test]
+    fn test_server_ping_response_without_ts() {
+        let a = adapter();
+        let msg: OkxWsMessage = serde_json::from_str(r#"{"event":"ping"}"#).unwrap();
+        let resp = a
+            .server_ping_response(&msg)
+            .expect("server ping must produce a pong response");
+        let v: serde_json::Value = serde_json::from_str(&resp).unwrap();
+        assert_eq!(v["event"], "pong");
+        assert!(
+            v.get("ts").is_none(),
+            "pong should not include ts when ping had none"
+        );
+    }
+
+    #[test]
+    fn test_server_ping_response_non_ping_returns_none() {
+        let a = adapter();
+
+        // A real pong from the server is not a server ping.
+        let msg: OkxWsMessage =
+            serde_json::from_str(r#"{"event":"pong","ts":"1621571640"}"#).unwrap();
+        assert!(!a.server_ping_response(&msg).is_some());
+
+        // A subscribe confirmation is not a server ping.
+        let msg: OkxWsMessage = serde_json::from_str(
+            r#"{"event":"subscribe","arg":{"channel":"books","instId":"BTC-USDT"}}"#,
+        )
+        .unwrap();
+        assert!(a.server_ping_response(&msg).is_none());
+
+        // A trade message is not a server ping.
+        let msg: OkxWsMessage =
+            serde_json::from_str(r#"{"arg":{"channel":"trades","instId":"BTC-USDT"},"data":[]}"#)
+                .unwrap();
+        assert!(a.server_ping_response(&msg).is_none());
     }
 
     #[test]

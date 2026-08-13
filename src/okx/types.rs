@@ -20,6 +20,13 @@ pub struct OkxWsMessage {
 
     #[serde(default, rename = "msg")]
     pub error_msg: Option<String>,
+
+    /// Top-level `ts` field, present on OKX server-initiated ping messages
+    /// (`{"event":"ping","ts":"<timestamp_ms>"}`) and the corresponding pong
+    /// responses. Used by `OkxAdapter::server_ping_response` to echo the
+    /// timestamp back in the pong.
+    #[serde(default)]
+    pub ts: Option<String>,
 }
 
 /// Argument field identifying the channel and instrument.
@@ -565,5 +572,51 @@ mod tests {
         assert!(msg.error_msg.is_none());
         let summary = msg.summary();
         assert_eq!(summary, "error (code=?: ?)");
+    }
+
+    // ------------------------------------------------------------------
+    // Server-initiated ping/pong (OKX V5 feed)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_server_ping_with_ts() {
+        let json = r#"{"event":"ping","ts":"1621571640"}"#;
+        let msg = OkxWsMessage::from_json(json).unwrap();
+        assert_eq!(msg.event.as_deref(), Some("ping"));
+        assert_eq!(msg.ts.as_deref(), Some("1621571640"));
+    }
+
+    #[test]
+    fn test_parse_server_ping_without_ts() {
+        let json = r#"{"event":"ping"}"#;
+        let msg = OkxWsMessage::from_json(json).unwrap();
+        assert_eq!(msg.event.as_deref(), Some("ping"));
+        assert!(msg.ts.is_none());
+    }
+
+    #[test]
+    fn test_parse_pong_with_ts() {
+        let json = r#"{"event":"pong","ts":"1621571640"}"#;
+        let msg = OkxWsMessage::from_json(json).unwrap();
+        assert_eq!(msg.event.as_deref(), Some("pong"));
+        assert_eq!(msg.ts.as_deref(), Some("1621571640"));
+    }
+
+    #[test]
+    fn test_parse_error_60012_illegal_ping() {
+        // This is the exact error OKX returns when the client sends
+        // {"event":"ping"} — the old client-initiated ping format that
+        // OKX now rejects.
+        let json =
+            r#"{"event":"error","code":"60012","msg":"Illegal request: {\"event\":\"ping\"}"}"#;
+        let msg = OkxWsMessage::from_json(json).unwrap();
+        assert_eq!(msg.event.as_deref(), Some("error"));
+        assert_eq!(msg.error_code.as_deref(), Some("60012"));
+        assert!(
+            msg.error_msg
+                .as_deref()
+                .unwrap()
+                .contains("Illegal request")
+        );
     }
 }
