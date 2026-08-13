@@ -128,6 +128,24 @@ pub struct ResilienceConfig {
     /// Default `false`.
     #[serde(default)]
     pub debug_log: bool,
+    /// Maximum time (in seconds) to wait for a replacement WebSocket connection to
+    /// confirm subscription and receive its first market-data item before falling
+    /// back to the standard reconnect path. Only relevant when
+    /// `silence_timeout_secs` is set: when the silence timer fires, the wsloop
+    /// spawns a parallel replacement connection and keeps the old connection alive
+    /// until the replacement confirms (or this timeout elapses).
+    ///
+    /// `None` disables the replacement timeout — the wsloop will wait indefinitely
+    /// for the replacement to confirm.
+    ///
+    /// Default: `Some(30)`.
+    #[serde(default = "default_silence_reconnect_timeout")]
+    pub silence_reconnect_timeout_secs: Option<u64>,
+}
+
+/// Default for [`ResilienceConfig::silence_reconnect_timeout_secs`].
+fn default_silence_reconnect_timeout() -> Option<u64> {
+    Some(30)
 }
 
 impl Default for ResilienceConfig {
@@ -141,6 +159,7 @@ impl Default for ResilienceConfig {
             max_attempts: None,
             silence_timeout_secs: None,
             debug_log: false,
+            silence_reconnect_timeout_secs: Some(30),
         }
     }
 }
@@ -422,6 +441,11 @@ mod tests {
             !cfg.debug_log,
             "debug_log must default to false (avoid per-message log flooding)"
         );
+        assert_eq!(
+            cfg.silence_reconnect_timeout_secs,
+            Some(30),
+            "silence_reconnect_timeout_secs must default to Some(30)"
+        );
     }
 
     #[test]
@@ -485,6 +509,50 @@ mod tests {
         }"#;
         let cfg: ResilienceConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.silence_timeout_secs, None);
+    }
+
+    #[test]
+    fn test_resilience_config_silence_reconnect_timeout_default() {
+        let cfg = ResilienceConfig::default();
+        assert_eq!(cfg.silence_reconnect_timeout_secs, Some(30));
+    }
+
+    #[test]
+    fn test_resilience_config_deserialize_silence_reconnect_timeout_omitted() {
+        let json = r#"{
+            "initial_backoff_ms": 1000,
+            "max_backoff_ms": 60000,
+            "backoff_multiplier": 2.0,
+            "jitter_ms": 1000
+        }"#;
+        let cfg: ResilienceConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.silence_reconnect_timeout_secs, Some(30));
+    }
+
+    #[test]
+    fn test_resilience_config_deserialize_silence_reconnect_timeout_explicit() {
+        let json = r#"{
+            "initial_backoff_ms": 1000,
+            "max_backoff_ms": 60000,
+            "backoff_multiplier": 2.0,
+            "jitter_ms": 1000,
+            "silence_reconnect_timeout_secs": 60
+        }"#;
+        let cfg: ResilienceConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.silence_reconnect_timeout_secs, Some(60));
+    }
+
+    #[test]
+    fn test_resilience_config_deserialize_silence_reconnect_timeout_none() {
+        let json = r#"{
+            "initial_backoff_ms": 1000,
+            "max_backoff_ms": 60000,
+            "backoff_multiplier": 2.0,
+            "jitter_ms": 1000,
+            "silence_reconnect_timeout_secs": null
+        }"#;
+        let cfg: ResilienceConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.silence_reconnect_timeout_secs, None);
     }
 
     #[test]

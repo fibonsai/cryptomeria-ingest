@@ -239,6 +239,17 @@ impl ExchangeAdapter for OkxAdapter {
         self.reset_local();
         Ok(vec![])
     }
+
+    fn fresh_adapter(&self) -> Self {
+        OkxAdapter::new(
+            self.instrument.clone(),
+            self.region.clone(),
+            self.max_level_pct,
+            self.max_level,
+            self.data_kind,
+            self.checksum_log,
+        )
+    }
 }
 
 #[cfg(test)]

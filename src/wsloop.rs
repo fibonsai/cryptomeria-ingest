@@ -3,6 +3,7 @@ use crate::items::{IngestError, MarketDataItem};
 use futures_util::{SinkExt, Stream, StreamExt, stream};
 use log::{debug, error, info, warn};
 use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -18,6 +19,12 @@ const DISABLED_SILENCE_SECS: u64 = 86_400 * 365; // ~1 year
 /// After `keepalive_interval * MAX_PING_PONG_MISSES` with no pong the
 /// connection is considered dead.
 const MAX_PING_PONG_MISSES: f64 = 2.0;
+
+/// Type alias for the shared, dynamically-updatable collection of background
+/// task join handles. Wrapped in `Arc<Mutex<_>>` so that a replacement task
+/// spawned on silence timeout can push its `JoinHandle` into the same set,
+/// ensuring abort-on-drop covers every live task.
+pub type SharedJoinHandles = Arc<Mutex<Vec<tokio::task::JoinHandle<Result<(), IngestError>>>>>;
 
 /// Compute the pong-timeout `Duration` from a keepalive interval (ms).
 ///
@@ -82,11 +89,16 @@ type MarketDataItemStream = Pin<Box<dyn Stream<Item = Result<MarketDataItem, Ing
 ///
 /// When `StreamHandle` is dropped, every join handle it owns is aborted, which
 /// cancels the associated WebSocket loop tasks (no task leaks).
+///
+/// `join_handles` is wrapped in `Arc<Mutex<...>>` so that a fork-and-replace
+/// replacement task can dynamically add its own `JoinHandle` to the same set,
+/// ensuring abort-on-drop covers every live task.
 pub struct StreamHandle {
     /// Stream of market data results.
     pub stream: MarketDataItemStream,
     /// Join handles for the background task(s). Aborted on drop.
-    pub join_handles: Vec<tokio::task::JoinHandle<Result<(), IngestError>>>,
+    /// Shared via `Arc<Mutex<_>>` so replacement tasks can append their handles.
+    pub join_handles: SharedJoinHandles,
 }
 
 impl Stream for StreamHandle {
@@ -101,9 +113,27 @@ impl Stream for StreamHandle {
 impl Drop for StreamHandle {
     fn drop(&mut self) {
         // Abort every owned background task when the stream is dropped.
-        for handle in &self.join_handles {
-            handle.abort();
+        // Lock the mutex (non-blocking, push/abort are fast), iterate, and abort.
+        if let Ok(guard) = self.join_handles.lock() {
+            for handle in guard.iter() {
+                handle.abort();
+            }
         }
+    }
+}
+
+/// Helper to create a fresh `SharedJoinHandles` (empty).
+fn new_join_handles() -> SharedJoinHandles {
+    Arc::new(Mutex::new(Vec::new()))
+}
+
+/// Helper to push a `JoinHandle` into a `SharedJoinHandles`, returning nothing.
+fn push_join_handle(
+    handles: &SharedJoinHandles,
+    handle: tokio::task::JoinHandle<Result<(), IngestError>>,
+) {
+    if let Ok(mut guard) = handles.lock() {
+        guard.push(handle);
     }
 }
 
@@ -116,23 +146,28 @@ pub fn merge_stream_handles(handles: Vec<StreamHandle>) -> StreamHandle {
     if handles.is_empty() {
         return StreamHandle {
             stream: Box::pin(stream::empty()),
-            join_handles: Vec::new(),
+            join_handles: new_join_handles(),
         };
     }
 
-    let mut join_handles = Vec::with_capacity(handles.len());
     let mut streams: Vec<MarketDataItemStream> = Vec::with_capacity(handles.len());
-    for mut h in handles {
-        // `StreamHandle` implements `Drop`, so we can't destructure it by move.
-        // Swap out the fields we need and let the (now-empty) handle drop harmlessly.
-        streams.push(std::mem::replace(&mut h.stream, Box::pin(stream::empty())));
-        join_handles.extend(std::mem::take(&mut h.join_handles));
+    let merged_handles = new_join_handles();
+    {
+        let mut guard = merged_handles.lock().expect("join_handles mutex poisoned");
+        for mut h in handles {
+            // `StreamHandle` implements `Drop`, so we can't destructure it by move.
+            // Swap out the fields we need and let the (now-empty) handle drop harmlessly.
+            streams.push(std::mem::replace(&mut h.stream, Box::pin(stream::empty())));
+            let extracted =
+                std::mem::take(&mut *h.join_handles.lock().expect("join_handles mutex poisoned"));
+            guard.extend(extracted);
+        }
     }
 
     let merged = stream::select_all(streams);
     StreamHandle {
         stream: Box::pin(merged),
-        join_handles,
+        join_handles: merged_handles,
     }
 }
 
@@ -270,121 +305,195 @@ pub trait ExchangeAdapter: Send + 'static {
     ) -> impl std::future::Future<Output = Result<Vec<MarketDataItem>, String>> + Send {
         async { Ok(vec![]) }
     }
+
+    /// Create a fresh adapter instance with the same configuration but clean
+    /// internal state (empty order book, no pending LOB, etc.).
+    ///
+    /// This is used by the graceful silence-replacement feature (ADR-027):
+    /// when the silence timer fires, the wsloop spawns a parallel replacement
+    /// connection using a fresh adapter (so the new connection starts with a
+    /// clean book rather than inheriting stale state from the old connection).
+    ///
+    /// The returned adapter must produce equivalent subscription messages
+    /// (`subscribe_msgs()`, `url()`, `instrument()`, `exchange()`) but must
+    /// NOT carry over any in-memory book state from the current instance.
+    fn fresh_adapter(&self) -> Self;
+
+    /// Whether a parsed message confirms that the WebSocket subscription is
+    /// active and the channel is live.
+    ///
+    /// The wsloop calls this during the initial read loop after sending
+    /// subscription messages. When it returns `true`, the subscription is
+    /// considered confirmed and (in the graceful-replacement path) the old
+    /// connection can be torn down.
+    ///
+    /// The default returns `false`. Exchanges that emit explicit
+    /// subscription-acknowledgment messages should override this.
+    ///
+    /// Note: even if `subscription_confirmed` is never `true`, the wsloop also
+    /// treats the first `MarketDataItem` (Lob/Trade) as confirmation.
+    fn subscription_confirmed(&mut self, msg: &Self::Message) -> bool {
+        let _ = msg;
+        false
+    }
+}
+
+/// Parameters extracted from [`ResilienceConfig`] for the wsloop.
+#[derive(Clone)]
+struct WsLoopParams {
+    resilience: ResilienceConfig,
+    max_attempts: Option<u64>,
+    silence_timeout_secs: Option<u64>,
+    silence_reconnect_timeout_secs: Option<u64>,
+    debug_log: bool,
+}
+
+impl WsLoopParams {
+    fn from_config(config: &crate::config::DataSourceConfig) -> Self {
+        WsLoopParams {
+            resilience: config.resilience.clone(),
+            max_attempts: normalize_max_attempts(config.resilience.max_attempts),
+            silence_timeout_secs: config.resilience.silence_timeout_secs,
+            silence_reconnect_timeout_secs: config.resilience.silence_reconnect_timeout_secs,
+            debug_log: config.resilience.debug_log,
+        }
+    }
 }
 
 /// Run the WebSocket loop for a single exchange adapter.
 ///
-/// Returns a `StreamHandle` providing the market data stream and a join handle
-/// for the background task.
-pub async fn run_exchange_stream<A>(
-    config: crate::config::DataSourceConfig,
-    mut adapter: A,
-) -> Result<StreamHandle, IngestError>
+/// Core connection lifecycle: connect -> auth -> subscribe -> read loop
+/// with silence/keepalive detection -> reconnect. Used both for the initial
+/// connection (`enable_fork = true`) and for replacement connections spawned
+/// on silence timeout (`enable_fork = false`, `confirmed_flag = Some(...)`).
+///
+/// Spawn a replacement ws-loop task (non-forking). Extracted as a separate
+/// function to avoid recursive `tokio::spawn` `Send`-bound issues: when
+/// `run_ws_loop` spawns itself directly, the compiler cannot prove the future
+/// is `Send` due to the recursive structure.
+fn spawn_replacement_loop<A>(
+    adapter: A,
+    tx: mpsc::Sender<Result<MarketDataItem, IngestError>>,
+    params: WsLoopParams,
+    join_handles: SharedJoinHandles,
+    confirmed_flag: Option<Arc<std::sync::atomic::AtomicBool>>,
+) -> tokio::task::JoinHandle<Result<(), IngestError>>
 where
     A: ExchangeAdapter,
 {
-    // Validate config.
-    config
-        .validate()
-        .map_err(|e| IngestError::Config(e.to_string()))?;
+    tokio::spawn(run_ws_loop(
+        adapter,
+        tx,
+        params,
+        join_handles,
+        false,
+        confirmed_flag,
+    ))
+}
 
-    // Channel for communication between the worker task and the stream.
-    let (tx, rx) = mpsc::channel::<Result<MarketDataItem, IngestError>>(1024);
-
-    // Clone data needed inside the async task.
+/// When `enable_fork` is `true` and the silence timer fires, a parallel replacement
+/// connection is spawned (using `adapter.fresh_adapter()`) sharing the same `tx`.
+/// The old connection drains until the replacement sets `confirmed_flag`
+/// (subscription ack or first `MarketDataItem`) or `silence_reconnect_timeout_secs`
+/// elapses. See ADR-027.
+async fn run_ws_loop<A>(
+    mut adapter: A,
+    tx: mpsc::Sender<Result<MarketDataItem, IngestError>>,
+    params: WsLoopParams,
+    join_handles: SharedJoinHandles,
+    enable_fork: bool,
+    confirmed_flag: Option<Arc<std::sync::atomic::AtomicBool>>,
+) -> Result<(), IngestError>
+where
+    A: ExchangeAdapter,
+{
     let instrument = adapter.instrument().to_string();
     let exchange = adapter.exchange().to_string();
     let url = adapter.url();
-    let resilience = config.resilience.clone();
-    let max_attempts = normalize_max_attempts(config.resilience.max_attempts);
-    let silence_timeout_secs = config.resilience.silence_timeout_secs;
+    let resilience = params.resilience.clone();
+    let max_attempts = params.max_attempts;
+    let silence_timeout_secs = params.silence_timeout_secs;
+    let silence_reconnect_timeout_secs = params.silence_reconnect_timeout_secs;
+    let debug_log = params.debug_log;
 
-    // Spawn the worker task.
-    let join_handle = tokio::task::spawn(async move {
-        let mut attempt = 0u64;
+    let mut attempt = 0u64;
+    let mut replaced = false;
 
-        // Main reconnection loop.
-        'outer: loop {
-            // Pre-compute channel names for logging before connection attempt.
-            let subscribe_channels = adapter.subscribe_msgs();
-            let channel_names: String = subscribe_channels
-                .iter()
-                .map(|(c, _)| c.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
+    'outer: loop {
+        let subscribe_channels = adapter.subscribe_msgs();
+        let channel_names: String = subscribe_channels
+            .iter()
+            .map(|(c, _)| c.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
 
-            // Establish WebSocket connection.
-            let ws_stream = match tokio_tungstenite::connect_async(&url).await {
-                Ok((stream, _)) => stream,
-                Err(e) => {
-                    error!(
-                        "[WS connect failed] exchange={exchange} instrument={instrument} channel={channel_names} url={url} error={e}"
-                    );
-                    attempt += 1;
-                    if let Some(max) = max_attempts
-                        && attempt >= max
-                    {
-                        error!(
-                            "[WS max reconnects exceeded] exchange={exchange} instrument={instrument} channel={channel_names} attempt={attempt} max_attempts={max_attempts:?}"
-                        );
-                        let _ = tx
-                            .send(Err(IngestError::MaxReconnectsExceeded(attempt as u32)))
-                            .await;
-                        return Err(IngestError::MaxReconnectsExceeded(attempt as u32));
-                    }
-                    let delay = backoff_delay(attempt - 1, &resilience);
-                    sleep(delay).await;
-                    continue;
-                }
-            };
-            info!(
-                "[WS connected] exchange={exchange} instrument={instrument} channel={channel_names} url={url}"
-            );
-
-            // Split into sender and receiver.
-            let (mut write, mut read) = ws_stream.split();
-
-            // Send authentication messages first (if the adapter requires auth).
-            // Some exchanges (e.g. Bitvavo) require WS auth to be confirmed before
-            // subscriptions are accepted. We send auth messages, wait for confirmation,
-            // then proceed to subscribe. See `ExchangeAdapter::auth_msgs`.
-            if let Some(auth_messages) = adapter.auth_msgs() {
-                let auth_timeout = adapter.auth_confirmation_timeout().expect(
-                    "auth_msgs() returned Some but auth_confirmation_timeout() returned None",
+        let ws_stream = match tokio_tungstenite::connect_async(&url).await {
+            Ok((stream, _)) => stream,
+            Err(e) => {
+                error!(
+                    "[WS connect failed] exchange={exchange} instrument={instrument} channel={channel_names} url={url} error={e}"
                 );
+                attempt += 1;
+                if let Some(max) = max_attempts
+                    && attempt >= max
+                {
+                    error!(
+                        "[WS max reconnects exceeded] exchange={exchange} instrument={instrument} channel={channel_names} attempt={attempt} max_attempts={max_attempts:?}"
+                    );
+                    let _ = tx
+                        .send(Err(IngestError::MaxReconnectsExceeded(attempt as u32)))
+                        .await;
+                    return Err(IngestError::MaxReconnectsExceeded(attempt as u32));
+                }
+                let delay = backoff_delay(attempt - 1, &resilience);
+                sleep(delay).await;
+                continue;
+            }
+        };
+        info!(
+            "[WS connected] exchange={exchange} instrument={instrument} channel={channel_names} url={url}"
+        );
 
-                // Send each auth message.
-                for (channel, msg) in auth_messages {
-                    match write.send(Message::Text(msg)).await {
-                        Ok(()) => {
-                            info!(
-                                "[WS authenticating] exchange={exchange} instrument={instrument} channel={channel}"
-                            );
-                        }
-                        Err(e) => {
+        let (mut write, mut read) = ws_stream.split();
+
+        let mut auth_failed = false;
+        if let Some(auth_messages) = adapter.auth_msgs() {
+            let auth_timeout = adapter
+                .auth_confirmation_timeout()
+                .expect("auth_msgs() returned Some but auth_confirmation_timeout() returned None");
+
+            for (channel, msg) in auth_messages {
+                match write.send(Message::Text(msg)).await {
+                    Ok(()) => {
+                        info!(
+                            "[WS authenticating] exchange={exchange} instrument={instrument} channel={channel}"
+                        );
+                    }
+                    Err(e) => {
+                        error!(
+                            "[WS auth send failed] exchange={exchange} instrument={instrument} channel={channel} error={e}"
+                        );
+                        attempt += 1;
+                        if let Some(max) = max_attempts
+                            && attempt >= max
+                        {
                             error!(
-                                "[WS auth send failed] exchange={exchange} instrument={instrument} channel={channel} error={e}"
+                                "[WS max reconnects exceeded] exchange={exchange} instrument={instrument} channel=auth attempt={attempt} max_attempts={max_attempts:?}"
                             );
-                            attempt += 1;
-                            if let Some(max) = max_attempts
-                                && attempt >= max
-                            {
-                                error!(
-                                    "[WS max reconnects exceeded] exchange={exchange} instrument={instrument} channel=auth attempt={attempt} max_attempts={max_attempts:?}"
-                                );
-                                let _ = tx
-                                    .send(Err(IngestError::MaxReconnectsExceeded(attempt as u32)))
-                                    .await;
-                                return Err(IngestError::MaxReconnectsExceeded(attempt as u32));
-                            }
-                            let delay = backoff_delay(attempt - 1, &resilience);
-                            sleep(delay).await;
-                            continue 'outer;
+                            let _ = tx
+                                .send(Err(IngestError::MaxReconnectsExceeded(attempt as u32)))
+                                .await;
+                            return Err(IngestError::MaxReconnectsExceeded(attempt as u32));
                         }
+                        let delay = backoff_delay(attempt - 1, &resilience);
+                        sleep(delay).await;
+                        auth_failed = true;
+                        break;
                     }
                 }
+            }
 
-                // Wait for auth confirmation from the exchange.
+            if !auth_failed {
                 let auth_timeout_sleep = tokio::time::sleep(auth_timeout);
                 tokio::pin!(auth_timeout_sleep);
 
@@ -398,11 +507,7 @@ where
                                 Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) => {
                                     match adapter.parse_message(&text) {
                                         Ok(parsed) => {
-                                            // Heartbeat handling during auth-wait.
-                                            if adapter.handle_heartbeat(&parsed) {
-                                                // tungstenite handles ws-level pings/pongs automatically.
-                                            }
-                                            // Check for auth confirmation.
+                                            if adapter.handle_heartbeat(&parsed) {}
                                             if adapter.is_auth_confirmed(&parsed) {
                                                 info!(
                                                     "[WS auth confirmed] exchange={exchange} instrument={instrument} channel=auth"
@@ -410,7 +515,6 @@ where
                                                 auth_confirmed = true;
                                                 break 'auth_wait;
                                             }
-                                            // Process any market data items (unexpected during auth-wait).
                                             if let Some(item) = adapter.handle_message(&parsed)
                                                 && tx.send(Ok(item)).await.is_err()
                                             {
@@ -428,12 +532,8 @@ where
                                 Some(Ok(tokio_tungstenite::tungstenite::Message::Frame(_))) => {
                                     debug!("[Unexpected raw frame during auth] exchange={exchange} instrument={instrument} channel=auth");
                                 }
-                                Some(Ok(tokio_tungstenite::tungstenite::Message::Ping(_))) => {
-                                    // tungstenite handles ping/pong automatically.
-                                }
-                                Some(Ok(tokio_tungstenite::tungstenite::Message::Pong(_))) => {
-                                    // pong
-                                }
+                                Some(Ok(tokio_tungstenite::tungstenite::Message::Ping(_))) => {}
+                                Some(Ok(tokio_tungstenite::tungstenite::Message::Pong(_))) => {}
                                 Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))) => {
                                     warn!(
                                         "[WS received close frame during auth] exchange={exchange} instrument={instrument} channel=auth"
@@ -454,12 +554,10 @@ where
                                 }
                             }
                         }
-                        // Check if the sender channel is closed (receiver dropped).
                         _ = tx.closed() => {
                             info!("[Receiver dropped during auth, shutting down] exchange={exchange} instrument={instrument} channel=auth");
                             break 'auth_wait;
                         }
-                        // Auth confirmation timeout.
                         _ = &mut auth_timeout_sleep => {
                             warn!(
                                 "[WS auth timeout] exchange={exchange} instrument={instrument} channel=auth timeout_secs={}",
@@ -489,235 +587,245 @@ where
                         delay.as_millis()
                     );
                     sleep(delay).await;
+                    auth_failed = true;
+                }
+            }
+        }
+
+        if auth_failed {
+            continue;
+        }
+
+        for (channel, msg) in subscribe_channels {
+            match write.send(Message::Text(msg)).await {
+                Ok(()) => {
+                    info!(
+                        "[WS subscribed] exchange={exchange} instrument={instrument} channel={channel}"
+                    );
+                }
+                Err(e) => {
+                    error!(
+                        "[WS subscribe failed] exchange={exchange} instrument={instrument} channel={channel} error={e}"
+                    );
+                    attempt += 1;
+                    if let Some(max) = max_attempts
+                        && attempt >= max
+                    {
+                        error!(
+                            "[WS max reconnects exceeded] exchange={exchange} instrument={instrument} channel={channel} attempt={attempt} max_attempts={max_attempts:?}"
+                        );
+                        let _ = tx
+                            .send(Err(IngestError::MaxReconnectsExceeded(attempt as u32)))
+                            .await;
+                        return Err(IngestError::MaxReconnectsExceeded(attempt as u32));
+                    }
+                    let delay = backoff_delay(attempt - 1, &resilience);
+                    sleep(delay).await;
                     continue 'outer;
                 }
             }
+        }
+        attempt = 0;
 
-            // Send subscription messages (channel_names pre-computed above).
-            for (channel, msg) in subscribe_channels {
-                match write.send(Message::Text(msg)).await {
-                    Ok(()) => {
-                        info!(
-                            "[WS subscribed] exchange={exchange} instrument={instrument} channel={channel}"
-                        );
-                    }
-                    Err(e) => {
-                        error!(
-                            "[WS subscribe failed] exchange={exchange} instrument={instrument} channel={channel} error={e}"
-                        );
-                        attempt += 1;
-                        if let Some(max) = max_attempts
-                            && attempt >= max
-                        {
-                            error!(
-                                "[WS max reconnects exceeded] exchange={exchange} instrument={instrument} channel={channel} attempt={attempt} max_attempts={max_attempts:?}"
-                            );
-                            let _ = tx
-                                .send(Err(IngestError::MaxReconnectsExceeded(attempt as u32)))
-                                .await;
-                            return Err(IngestError::MaxReconnectsExceeded(attempt as u32));
-                        }
-                        let delay = backoff_delay(attempt - 1, &resilience);
-                        sleep(delay).await;
-                        continue 'outer; // restart connection
-                    }
-                }
-            }
-            attempt = 0; // reset attempt counter on successful connect
+        // --- Graceful replacement (fork-and-replace) state (ADR-027) ---
+        let replacement_confirmed_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let replacement_confirmed_flag_clone = Arc::clone(&replacement_confirmed_flag);
+        let mut replacement_started = false;
 
-            // Silence timeout timer — reset on every received message so any
-            // WebSocket traffic (data, heartbeat, ping/pong) counts as activity.
-            // When `silence_timeout_secs` is `None`, the sentinel duration is
-            // effectively infinite and the timer branch never fires.
-            let silence_duration = silence_sleep_duration(silence_timeout_secs);
-            let silence_sleep = tokio::time::sleep(silence_duration);
-            tokio::pin!(silence_sleep);
+        // --- Timers ---
+        let silence_duration = silence_sleep_duration(silence_timeout_secs);
+        let silence_sleep = tokio::time::sleep(silence_duration);
+        tokio::pin!(silence_sleep);
 
-            // Keepalive/ping setup.
-            //
-            // Send a ping (app-level JSON or raw ws-level frame) every
-            // `keepalive_interval`. Track the time of the last received pong.
-            // If `last_pong.elapsed() > keepalive_interval * MAX_PING_PONG_MISSES`
-            // (i.e., `lastPong + keepAlive * 2 < now`), raise RequestTimeout
-            // and break to the reconnect path.
-            let keepalive_ms = adapter.keepalive_interval_ms();
-            let keepalive_interval = Duration::from_millis(keepalive_ms);
-            let ping_timeout = keepalive_timeout(keepalive_ms);
-            let ping_msg = adapter.ping_msg();
-            let mut last_pong = tokio::time::Instant::now();
+        let keepalive_ms = adapter.keepalive_interval_ms();
+        let keepalive_interval = Duration::from_millis(keepalive_ms);
+        let ping_timeout = keepalive_timeout(keepalive_ms);
+        let ping_msg = adapter.ping_msg();
+        let mut last_pong = tokio::time::Instant::now();
 
-            let ping_sleep = tokio::time::sleep(keepalive_interval);
-            tokio::pin!(ping_sleep);
+        let ping_sleep = tokio::time::sleep(keepalive_interval);
+        tokio::pin!(ping_sleep);
 
-            // Per-message debug logs (ping/pong, binary/frame, parse failures) are
-            // high-frequency; gate them behind `debug_log` to avoid flooding.
-            let debug_log = resilience.debug_log;
+        let debug_log = debug_log;
 
-            // Main read loop.
-            'read: loop {
-                tokio::select! {
-                    biased;
-                    // Read a WebSocket message.
-                     msg = read.next() => {
-                         match msg {
-                            Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) => {
-                                // Parse and handle the message.
-                                match adapter.parse_message(&text) {
-                        Ok(parsed) => {
-                                         // Check for pong response to our keepalive ping (app-level).
-                                         if adapter.is_pong(&parsed) {
-                                             last_pong = tokio::time::Instant::now();
-                                             if should_log_debug(debug_log, log::log_enabled!(log::Level::Debug)) {
-                                                 debug!(
-                                                     "[WS keepalive pong received (app-level)] exchange={exchange} instrument={instrument} channel={channel_names}"
-                                                 );
-                                             }
-                                         }
-                                         // Heartbeat handling.
-                                        if adapter.handle_heartbeat(&parsed) {
-                                            // Respond with pong if needed – the tungstenite
-                                            // library handles websocket-level pings/pongs
-                                            // automatically, so we just ignore here.
-                                        }
-                                        // Pass to adapter for processing.
-                                         if let Some(item) = adapter.handle_message(&parsed) {
-                                             // Only actual market data (Lob/Trade) resets the
-                                             // silence timer; pongs, heartbeats, and other
-                                             // protocol noise do not count as channel activity.
-                                             silence_sleep.as_mut().reset(
-                                                 tokio::time::Instant::now() + silence_duration
-                                             );
-                                             // Send the item to the receiver.
-                                             if tx.send(Ok(item)).await.is_err() {
-                                                // Receiver dropped – shutdown.
-                                                break 'read;
-                                            }
+        // Phase 1: main read loop with silence detection.
+        'read: loop {
+            tokio::select! {
+                biased;
+                msg = read.next() => {
+                    match msg {
+                        Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) => {
+                            match adapter.parse_message(&text) {
+                                Ok(parsed) => {
+                                    if let Some(ref flag) = confirmed_flag {
+                                        if !flag.load(std::sync::atomic::Ordering::SeqCst)
+                                            && adapter.subscription_confirmed(&parsed)
+                                        {
+                                            flag.store(true, std::sync::atomic::Ordering::SeqCst);
                                         }
                                     }
-                                    Err(e) => {
+                                    if adapter.is_pong(&parsed) {
+                                        last_pong = tokio::time::Instant::now();
                                         if should_log_debug(debug_log, log::log_enabled!(log::Level::Debug)) {
                                             debug!(
-                                                "[Failed to parse WS message] exchange={exchange} instrument={instrument} channel={channel_names} text={text} error={e}"
+                                                "[WS keepalive pong received (app-level)] exchange={exchange} instrument={instrument} channel={channel_names}"
                                             );
                                         }
-                                        // Continue; don't break the connection on parse errors.
                                     }
-                                }
-                            }
-                            Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(_))) => {
-                                if should_log_debug(debug_log, log::log_enabled!(log::Level::Debug)) {
-                                    debug!(
-                                        "[Unexpected binary message] exchange={exchange} instrument={instrument} channel={channel_names}"
-                                    );
-                                }
-                            }
-                            Some(Ok(tokio_tungstenite::tungstenite::Message::Frame(_))) => {
-                                if should_log_debug(debug_log, log::log_enabled!(log::Level::Debug)) {
-                                    debug!(
-                                        "[Unexpected raw frame] exchange={exchange} instrument={instrument} channel={channel_names}"
-                                    );
-                                }
-                            }
-                            Some(Ok(tokio_tungstenite::tungstenite::Message::Ping(_))) => {
-                                // tungstenite handles ping/pong automatically at the ws level.
-                                if should_log_debug(debug_log, log::log_enabled!(log::Level::Debug)) {
-                                    debug!(
-                                        "[WS keepalive ping received] exchange={exchange} instrument={instrument} channel={channel_names}"
-                                    );
-                                }
-                            }
-                            Some(Ok(tokio_tungstenite::tungstenite::Message::Pong(_))) => {
-                                // Raw ws-level pong received — update keepalive tracking.
-                                last_pong = tokio::time::Instant::now();
-                                if should_log_debug(debug_log, log::log_enabled!(log::Level::Debug)) {
-                                    debug!(
-                                        "[WS keepalive pong received] exchange={exchange} instrument={instrument} channel={channel_names}"
-                                    );
-                                }
-                            }
-                            Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))) => {
-                                info!("[WS received close frame] exchange={exchange} instrument={instrument} channel={channel_names}");
-                                break 'read;
-                            }
-                            Some(Err(e)) => {
-                                error!("[WS read error] exchange={exchange} instrument={instrument} channel={channel_names} error={e}");
-                                break 'read;
-                            }
-                            None => {
-                                // Stream ended.
-                                info!("[WS stream ended] exchange={exchange} instrument={instrument} channel={channel_names}");
-                                break 'read;
-                            }
-                        }
-                    }
-                    // Check if the sender channel is closed (receiver dropped).
-                    _ = tx.closed() => {
-                        info!("[Receiver dropped, shutting down] exchange={exchange} instrument={instrument} channel={channel_names}");
-                        break 'read;
-                    }
-                    // Keepalive ping timer: send a ping every `keepalive_interval`.
-                    // If no pong has been received within `keepalive_interval * 2`,
-                    // raise RequestTimeout and break to reconnect.
-                    _ = &mut ping_sleep => {
-                        if last_pong.elapsed() > ping_timeout {
-                            warn!(
-                                "[WS keepalive timeout] exchange={exchange} instrument={instrument} channel={channel_names} last_pong_ms={} timeout_ms={}",
-                                last_pong.elapsed().as_millis(),
-                                ping_timeout.as_millis()
-                            );
-                            let _ = tx
-                                .send(Err(IngestError::RequestTimeout(format!(
-                                    "no pong received within {}ms (keepalive={}ms) for exchange={} instrument={}",
-                                    ping_timeout.as_millis(),
-                                    keepalive_interval.as_millis(),
-                                    exchange,
-                                    instrument
-                                ))))
-                                .await;
-                            break 'read;
-                        }
-                        // Send keepalive ping.
-                        if let Some(ref msg) = ping_msg {
-                            match write.send(Message::Text(msg.clone())).await {
-                                Ok(()) => {
-                                    if should_log_debug(debug_log, log::log_enabled!(log::Level::Debug)) {
-                                        debug!(
-                                            "[WS keepalive ping sent] exchange={exchange} instrument={instrument} channel={channel_names}"
+                                    if adapter.handle_heartbeat(&parsed) {}
+                                    if let Some(item) = adapter.handle_message(&parsed) {
+                                        if let Some(ref flag) = confirmed_flag {
+                                            if !flag.load(std::sync::atomic::Ordering::SeqCst) {
+                                                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                                            }
+                                        }
+                                        silence_sleep.as_mut().reset(
+                                            tokio::time::Instant::now() + silence_duration
                                         );
+                                        if tx.send(Ok(item)).await.is_err() {
+                                            break 'read;
+                                        }
                                     }
                                 }
                                 Err(e) => {
-                                    error!(
-                                        "[WS keepalive ping send failed] exchange={exchange} instrument={instrument} channel={channel_names} error={e}"
-                                    );
-                                    break 'read;
+                                    if should_log_debug(debug_log, log::log_enabled!(log::Level::Debug)) {
+                                        debug!(
+                                            "[Failed to parse WS message] exchange={exchange} instrument={instrument} channel={channel_names} text={text} error={e}"
+                                        );
+                                    }
                                 }
                             }
-                        } else {
-                            // Raw ws-level ping.
-                            if let Err(e) = write.send(Message::Ping(vec![])).await {
-                                error!(
-                                    "[WS keepalive ping send failed] exchange={exchange} instrument={instrument} channel={channel_names} error={e}"
-                                );
-                                break 'read;
-                            }
+                        }
+                        Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(_))) => {
                             if should_log_debug(debug_log, log::log_enabled!(log::Level::Debug)) {
-                                debug!(
-                                    "[WS keepalive ping sent] exchange={exchange} instrument={instrument} channel={channel_names}"
-                                );
+                                debug!("[Unexpected binary message] exchange={exchange} instrument={instrument} channel={channel_names}");
                             }
                         }
-                        ping_sleep.as_mut().reset(
-                            tokio::time::Instant::now() + keepalive_interval
-                        );
+                        Some(Ok(tokio_tungstenite::tungstenite::Message::Frame(_))) => {
+                            if should_log_debug(debug_log, log::log_enabled!(log::Level::Debug)) {
+                                debug!("[Unexpected raw frame] exchange={exchange} instrument={instrument} channel={channel_names}");
+                            }
+                        }
+                        Some(Ok(tokio_tungstenite::tungstenite::Message::Ping(_))) => {
+                            if should_log_debug(debug_log, log::log_enabled!(log::Level::Debug)) {
+                                debug!("[WS keepalive ping received] exchange={exchange} instrument={instrument} channel={channel_names}");
+                            }
+                        }
+                        Some(Ok(tokio_tungstenite::tungstenite::Message::Pong(_))) => {
+                            last_pong = tokio::time::Instant::now();
+                            if should_log_debug(debug_log, log::log_enabled!(log::Level::Debug)) {
+                                debug!("[WS keepalive pong received] exchange={exchange} instrument={instrument} channel={channel_names}");
+                            }
+                        }
+                        Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))) => {
+                            info!("[WS received close frame] exchange={exchange} instrument={instrument} channel={channel_names}");
+                            break 'read;
+                        }
+                        Some(Err(e)) => {
+                            error!("[WS read error] exchange={exchange} instrument={instrument} channel={channel_names} error={e}");
+                            break 'read;
+                        }
+                        None => {
+                            info!("[WS stream ended] exchange={exchange} instrument={instrument} channel={channel_names}");
+                            break 'read;
+                        }
                     }
-                    // Silence timeout: no `MarketDataItem` (Lob/Trade) has been
-                    // received within the configured window. Protocol traffic
-                    // such as pongs, heartbeats, and binary frames does not count
-                    // as channel activity. Treat as a connection failure and
-                    // fall through to the existing reconnect path.
+
+                    // Check if replacement has confirmed (fork tasks only).
+                    if replacement_started
+                        && replacement_confirmed_flag.load(std::sync::atomic::Ordering::SeqCst)
+                    {
+                        info!(
+                            "[WS replacement confirmed] exchange={exchange} instrument={instrument} channel={channel_names}"
+                        );
+                        replaced = true;
+                        break 'read;
+                    }
+                }
+                _ = tx.closed() => {
+                    info!("[Receiver dropped, shutting down] exchange={exchange} instrument={instrument} channel={channel_names}");
+                    break 'read;
+                }
+                _ = &mut ping_sleep => {
+                    if last_pong.elapsed() > ping_timeout {
+                        warn!(
+                            "[WS keepalive timeout] exchange={exchange} instrument={instrument} channel={channel_names} last_pong_ms={} timeout_ms={}",
+                            last_pong.elapsed().as_millis(),
+                            ping_timeout.as_millis()
+                        );
+                        let _ = tx
+                            .send(Err(IngestError::RequestTimeout(format!(
+                                "no pong received within {}ms (keepalive={}ms) for exchange={} instrument={}",
+                                ping_timeout.as_millis(),
+                                keepalive_interval.as_millis(),
+                                exchange,
+                                instrument
+                            ))))
+                            .await;
+                        break 'read;
+                    }
+                    if let Some(ref msg) = ping_msg {
+                        match write.send(Message::Text(msg.clone())).await {
+                            Ok(()) => {
+                                if should_log_debug(debug_log, log::log_enabled!(log::Level::Debug)) {
+                                    debug!("[WS keepalive ping sent] exchange={exchange} instrument={instrument} channel={channel_names}");
+                                }
+                            }
+                            Err(e) => {
+                                error!("[WS keepalive ping send failed] exchange={exchange} instrument={instrument} channel={channel_names} error={e}");
+                                break 'read;
+                            }
+                        }
+                    } else {
+                        if let Err(e) = write.send(Message::Ping(vec![])).await {
+                            error!("[WS keepalive ping send failed] exchange={exchange} instrument={instrument} channel={channel_names} error={e}");
+                            break 'read;
+                        }
+                        if should_log_debug(debug_log, log::log_enabled!(log::Level::Debug)) {
+                            debug!("[WS keepalive ping sent] exchange={exchange} instrument={instrument} channel={channel_names}");
+                        }
+                    }
+                    ping_sleep.as_mut().reset(
+                        tokio::time::Instant::now() + keepalive_interval
+                    );
+                }
+                // Silence timeout.
                     _ = &mut silence_sleep => {
                         if let Some(secs) = silence_timeout_secs {
+                        if enable_fork && !replacement_started {
+                            warn!(
+                                "[WS channel silent for >{secs}s, spawning replacement] exchange={exchange} instrument={instrument} channel={channel_names}"
+                            );
+                            let fresh_adapter = adapter.fresh_adapter();
+                            let new_tx = tx.clone();
+                            let new_params = params.clone();
+                            let new_join_handles = join_handles.clone();
+                            let new_confirmed_flag = replacement_confirmed_flag_clone.clone();
+            let handle = spawn_replacement_loop(
+                fresh_adapter,
+                new_tx,
+                new_params,
+                new_join_handles,
+                Some(new_confirmed_flag),
+            );
+                            push_join_handle(&join_handles, handle);
+                            replacement_started = true;
+                            // Reset silence timer to keep draining old connection.
+                            silence_sleep.as_mut().reset(
+                                tokio::time::Instant::now() + silence_duration
+                            );
+                        } else if replacement_started {
+                            // Replacement already spawned — check if it confirmed.
+                            if replacement_confirmed_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                                info!(
+                                    "[WS replacement confirmed] exchange={exchange} instrument={instrument} channel={channel_names}"
+                                );
+                                replaced = true;
+                                break 'read;
+                            }
+                            // Replacement not confirmed yet — break to enter drain phase.
+                            break 'read;
+                        } else {
                             warn!(
                                 "[WS channel silent for >{secs}s] exchange={exchange} instrument={instrument} channel={channel_names}"
                             );
@@ -726,57 +834,170 @@ where
                     }
                 }
             }
+        }
 
-            // If we broke out of the read loop, close the write side and retry.
-            let _ = write.close().await;
+        // Phase 2: drain old connection while waiting for replacement to confirm.
+        if !replaced && replacement_started {
+            let timeout_dur = silence_reconnect_timeout_secs
+                .map(Duration::from_secs)
+                .unwrap_or_else(|| Duration::from_secs(DISABLED_SILENCE_SECS));
+            let replacement_timeout_sleep = tokio::time::sleep(timeout_dur);
+            tokio::pin!(replacement_timeout_sleep);
 
-            // Increment attempt counter and backoff before reconnecting.
-            attempt += 1;
-            if let Some(max) = max_attempts
-                && attempt >= max
-            {
-                error!(
-                    "[WS max reconnects exceeded] exchange={exchange} instrument={instrument} channel={channel_names} attempt={attempt} max_attempts={max_attempts:?}"
-                );
-                let _ = tx
-                    .send(Err(IngestError::MaxReconnectsExceeded(attempt as u32)))
-                    .await;
-                return Err(IngestError::MaxReconnectsExceeded(attempt as u32));
-            }
+            // Poll the shared flag every 500ms to detect confirmation.
+            let check_interval = tokio::time::sleep(Duration::from_millis(500));
+            tokio::pin!(check_interval);
 
-            // Optional: fetch snapshot on reconnect (e.g., Bitstamp).
-            match adapter.on_reconnect().await {
-                Ok(items) => {
-                    for item in items {
-                        if tx.send(Ok(item)).await.is_err() {
-                            // Receiver dropped.
-                            break 'outer Err(IngestError::ChannelClosed);
+            'replacement: loop {
+                tokio::select! {
+                    biased;
+                    msg = read.next() => {
+                        match msg {
+                            Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) => {
+                                if let Ok(parsed) = adapter.parse_message(&text) {
+                                    if adapter.is_pong(&parsed) {
+                                        last_pong = tokio::time::Instant::now();
+                                    }
+                                    if let Some(item) = adapter.handle_message(&parsed) {
+                                        if tx.send(Ok(item)).await.is_err() {
+                                            break 'replacement;
+                                        }
+                                    }
+                                }
+                            }
+                            Some(Ok(tokio_tungstenite::tungstenite::Message::Pong(_))) => {
+                                last_pong = tokio::time::Instant::now();
+                            }
+                            Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))) |
+                            None => {
+                                break 'replacement;
+                            }
+                            Some(Ok(_)) => {}
+                            Some(Err(e)) => {
+                                error!("[WS read error during replacement wait] exchange={exchange} instrument={instrument} channel={channel_names} error={e}");
+                                break 'replacement;
+                            }
                         }
                     }
-                }
-                Err(e) => {
-                    warn!(
-                        "[WS reconnect snapshot failed] exchange={exchange} instrument={instrument} channel={channel_names} error={e}"
-                    );
+                    _ = tx.closed() => {
+                        break 'replacement;
+                    }
+                    _ = &mut replacement_timeout_sleep => {
+                        warn!(
+                            "[WS replacement not confirmed within timeout, falling back to reconnect] exchange={exchange} instrument={instrument} channel={channel_names}"
+                        );
+                        break 'replacement;
+                    }
+                    _ = &mut check_interval => {
+                        if replacement_confirmed_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                            info!(
+                                "[WS replacement confirmed] exchange={exchange} instrument={instrument} channel={channel_names}"
+                            );
+                            replaced = true;
+                            break 'replacement;
+                        }
+                        check_interval.as_mut().reset(
+                            tokio::time::Instant::now() + Duration::from_millis(500)
+                        );
+                    }
                 }
             }
-
-            // Backoff before next reconnect attempt.
-            let delay = backoff_delay(attempt - 1, &resilience);
-            warn!(
-                "[WS reconnecting] exchange={exchange} instrument={instrument} channel={channel_names} attempt={attempt} delay_ms={} max_attempts={:?}",
-                delay.as_millis(),
-                max_attempts
-            );
-            sleep(delay).await;
         }
-    });
+
+        // If replacement was confirmed, exit cleanly — the replacement task continues.
+        if replaced {
+            let _ = write.close().await;
+            info!(
+                "[WS old connection closed after replacement confirmed] exchange={exchange} instrument={instrument} channel={channel_names}"
+            );
+            return Ok(());
+        }
+
+        // Close the write side and retry.
+        let _ = write.close().await;
+
+        // Increment attempt counter and backoff before reconnecting.
+        attempt += 1;
+        if let Some(max) = max_attempts
+            && attempt >= max
+        {
+            error!(
+                "[WS max reconnects exceeded] exchange={exchange} instrument={instrument} channel={channel_names} attempt={attempt} max_attempts={max_attempts:?}"
+            );
+            let _ = tx
+                .send(Err(IngestError::MaxReconnectsExceeded(attempt as u32)))
+                .await;
+            return Err(IngestError::MaxReconnectsExceeded(attempt as u32));
+        }
+
+        // Optional: fetch snapshot on reconnect (e.g., Bitstamp).
+        match adapter.on_reconnect().await {
+            Ok(items) => {
+                for item in items {
+                    if tx.send(Ok(item)).await.is_err() {
+                        break 'outer Err(IngestError::ChannelClosed);
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(
+                    "[WS reconnect snapshot failed] exchange={exchange} instrument={instrument} channel={channel_names} error={e}"
+                );
+            }
+        }
+
+        // Backoff before next reconnect attempt.
+        let delay = backoff_delay(attempt - 1, &resilience);
+        warn!(
+            "[WS reconnecting] exchange={exchange} instrument={instrument} channel={channel_names} attempt={attempt} delay_ms={} max_attempts={:?}",
+            delay.as_millis(),
+            max_attempts
+        );
+        sleep(delay).await;
+    }
+}
+
+/// Run the WebSocket loop for a single exchange adapter.
+///
+/// Returns a `StreamHandle` providing the market data stream and join handle(s)
+/// for the background task(s).
+///
+/// When the silence timer fires and `silence_timeout_secs` is set, a parallel
+/// replacement connection is spawned (using `adapter.fresh_adapter()`); the old
+/// connection continues draining until the replacement confirms subscription and
+/// receives its first market-data item, or until `silence_reconnect_timeout_secs`
+/// elapses. See ADR-027 for details.
+pub async fn run_exchange_stream<A>(
+    config: crate::config::DataSourceConfig,
+    adapter: A,
+) -> Result<StreamHandle, IngestError>
+where
+    A: ExchangeAdapter,
+{
+    config
+        .validate()
+        .map_err(|e| IngestError::Config(e.to_string()))?;
+
+    let (tx, rx) = mpsc::channel::<Result<MarketDataItem, IngestError>>(1024);
+
+    let params = WsLoopParams::from_config(&config);
+    let join_handles = new_join_handles();
+
+    let join_handle = tokio::task::spawn(run_ws_loop(
+        adapter,
+        tx,
+        params,
+        join_handles.clone(),
+        true,
+        None,
+    ));
+    push_join_handle(&join_handles, join_handle);
 
     Ok(StreamHandle {
         stream: Box::pin(stream::unfold(rx, |mut rx| async move {
             rx.recv().await.map(|item| (item, rx))
         })),
-        join_handles: vec![join_handle],
+        join_handles,
     })
 }
 
@@ -879,11 +1100,11 @@ mod tests {
         let counter_clone = std::sync::Arc::clone(&counter);
         let handle = StreamHandle {
             stream: Box::pin(stream::pending()),
-            join_handles: vec![tokio::spawn(async move {
+            join_handles: Arc::new(Mutex::new(vec![tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_secs(30)).await;
                 counter_clone.fetch_add(1, Ordering::SeqCst);
                 Ok(())
-            })],
+            })])),
         };
         drop(handle);
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -899,13 +1120,13 @@ mod tests {
             stream: Box::pin(stream::unfold(rx1, |mut rx| async move {
                 rx.recv().await.map(|item| (item, rx))
             })),
-            join_handles: vec![tokio::spawn(async { Ok(()) })],
+            join_handles: Arc::new(Mutex::new(vec![tokio::spawn(async { Ok(()) })])),
         };
         let h2 = StreamHandle {
             stream: Box::pin(stream::unfold(rx2, |mut rx| async move {
                 rx.recv().await.map(|item| (item, rx))
             })),
-            join_handles: vec![tokio::spawn(async { Ok(()) })],
+            join_handles: Arc::new(Mutex::new(vec![tokio::spawn(async { Ok(()) })])),
         };
 
         let mut merged = merge_stream_handles(vec![h1, h2]);
@@ -939,11 +1160,11 @@ mod tests {
         let counter_clone = std::sync::Arc::clone(&counter);
         let handle = StreamHandle {
             stream: Box::pin(stream::pending()),
-            join_handles: vec![tokio::spawn(async move {
+            join_handles: Arc::new(Mutex::new(vec![tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_secs(30)).await;
                 counter_clone.fetch_add(1, Ordering::SeqCst);
                 Ok(())
-            })],
+            })])),
         };
         let merged = merge_stream_handles(vec![handle]);
         drop(merged);
@@ -1009,6 +1230,11 @@ mod tests {
         }
         fn handle_heartbeat(&self, _msg: &Self::Message) -> bool {
             false
+        }
+        fn fresh_adapter(&self) -> Self {
+            MockAdapter {
+                url: self.url.clone(),
+            }
         }
     }
 
@@ -1202,6 +1428,12 @@ mod tests {
         fn ping_msg(&self) -> Option<String> {
             None
         }
+
+        fn fresh_adapter(&self) -> Self {
+            SilenceTestAdapter {
+                url: self.url.clone(),
+            }
+        }
     }
 
     /// Start a mock WebSocket server that sends `msg` every `interval_ms`.
@@ -1253,6 +1485,7 @@ mod tests {
             resilience: ResilienceConfig {
                 initial_backoff_ms: 1,
                 silence_timeout_secs: Some(silence_secs),
+                silence_reconnect_timeout_secs: Some(1),
                 max_attempts: Some(1),
                 ..Default::default()
             },

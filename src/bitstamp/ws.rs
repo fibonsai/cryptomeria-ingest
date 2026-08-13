@@ -300,6 +300,19 @@ impl ExchangeAdapter for BitstampAdapter {
             Ok(vec![])
         }
     }
+
+    fn fresh_adapter(&self) -> Self {
+        BitstampAdapter::new(
+            self.instrument.clone(),
+            self.exchange.clone(),
+            self.region.clone(),
+            self.cli_instrument.clone(),
+            self.max_level_pct,
+            self.max_level,
+            self.data_kind,
+            self.checksum_log,
+        )
+    }
 }
 
 #[cfg(test)]

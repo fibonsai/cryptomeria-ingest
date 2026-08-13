@@ -65,6 +65,7 @@ pub fn build_getbook_msg(market: &str, depth: u64) -> String {
 }
 
 /// Bitvavo WS Market Data Pro exchange adapter.
+#[derive(Clone)]
 pub struct BitvavoAdapter {
     pub instrument: String,
     pub exchange: &'static str,
@@ -286,6 +287,23 @@ impl ExchangeAdapter for BitvavoAdapter {
 
     fn url(&self) -> String {
         crate::urls::websocket_url(&self.region, "bitvavo").to_string()
+    }
+
+    fn fresh_adapter(&self) -> Self {
+        BitvavoAdapter::new(
+            self.instrument.clone(),
+            self.region.clone(),
+            self.api_key.clone(),
+            self.api_secret.clone(),
+            self.max_level_pct,
+            self.max_level,
+            self.data_kind,
+        )
+    }
+
+    fn subscription_confirmed(&mut self, msg: &Self::Message) -> bool {
+        // Bitvavo sends `{"event":"subscribed", ...}` to confirm.
+        msg.event.as_deref() == Some("subscribed")
     }
 }
 
