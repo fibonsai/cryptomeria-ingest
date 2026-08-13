@@ -46,6 +46,11 @@ struct Cli {
     /// rejects/drops the crossed level unconditionally — only the warn! is gated.
     #[clap(long, default_value_t = false)]
     crossguard_log: bool,
+    /// Number of diff_order_book deltas to buffer before fetching a REST
+    /// snapshot (Bitstamp delta-buffering pattern, CCXT Pro `delta_cache_limit`).
+    /// Default 6. Set to 0 to disable buffering and fetch snapshot on connect.
+    #[clap(long, default_value_t = 6)]
+    snapshot_delay: usize,
     #[clap(flatten)]
     resilience: ResilienceCli,
 }
@@ -135,6 +140,7 @@ async fn main() {
             api_secret: cli.api_secret,
             checksum_log: cli.checksum_log,
             crossguard_log: cli.crossguard_log,
+            snapshot_delay: cli.snapshot_delay,
         }
     };
 

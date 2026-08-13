@@ -8,14 +8,11 @@ use ordered_float::OrderedFloat;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap};
 
-/// Bitstamp LOB is temporarily disabled while a known bug in the order-book
-/// model is being fixed (see the README warning). The LOB *stream* still
-/// subscribes and receives messages but returns an empty object
-/// (a `LobItem` with empty `bids`/`asks`) instead of the buggy data.
-///
-/// All parsing/processing logic in this module is retained and still covered
-/// by unit tests. To re-enable, flip this to `false`.
-pub const BITSTAMP_LOB_DISABLED: bool = true;
+/// Bitstamp LOB stream re-enabled after fixing the zero-amount level removal bug
+/// (see ADR-026). The `apply_orderbook` method now handles deletion markers
+/// (price levels with `amount: "0"`) by clearing that price level directly,
+/// rather than routing them through `apply_order` with a dummy `id: 0`.
+pub const BITSTAMP_LOB_DISABLED: bool = false;
 
 /// Direction of a price level.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -292,30 +289,27 @@ impl OrderBook {
             if level.len() >= 2
                 && let (Ok(price), Ok(amount)) = (level[0].parse::<f64>(), level[1].parse::<f64>())
             {
-                self.apply_order(&OrderEntry {
-                    id: 0, // dummy
-                    id_str: "".to_string(),
-                    price: format!("{:.8}", price),
-                    amount: format!("{:.8}", amount),
-                    order_type: 0, // bid
-                    timestamp: "0".to_string(),
-                });
+                let price = OrderedFloat(price);
+                if amount == 0.0 {
+                    self.bids.remove(&Reverse(price));
+                } else {
+                    self.bids.insert(Reverse(price), amount);
+                }
             }
         }
         for level in &ob.asks {
             if level.len() >= 2
                 && let (Ok(price), Ok(amount)) = (level[0].parse::<f64>(), level[1].parse::<f64>())
             {
-                self.apply_order(&OrderEntry {
-                    id: 0, // dummy
-                    id_str: "".to_string(),
-                    price: format!("{:.8}", price),
-                    amount: format!("{:.8}", amount),
-                    order_type: 1, // ask
-                    timestamp: "0".to_string(),
-                });
+                let price = OrderedFloat(price);
+                if amount == 0.0 {
+                    self.asks.remove(&price);
+                } else {
+                    self.asks.insert(price, amount);
+                }
             }
         }
+        self.repair_crossing();
     }
 
     pub fn total_bid_size(&self) -> f64 {
@@ -1157,5 +1151,91 @@ mod tests {
         let book = OrderBook::new();
         assert!(!book.needs_resync());
         assert!(!book.checksum_failed());
+    }
+
+    // ------------------------------------------------------------------
+    // Zero-amount level removal in apply_orderbook (ADR-026 fix)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_apply_orderbook_zero_amount_removes_bid_level() {
+        let mut book = OrderBook::new();
+        // Seed with a bid at 100.0, size 1.5
+        book.apply_orderbook(&OrderBookData {
+            bids: vec![vec!["100.0".into(), "1.5".into()]],
+            asks: vec![],
+            timestamp: "0".to_string(),
+            microtimestamp: "0".to_string(),
+        });
+        assert_eq!(book.num_bids(), 1);
+
+        // Apply a delta that sets the same price to 0 amount (deletion marker)
+        book.apply_orderbook(&OrderBookData {
+            bids: vec![vec!["100.0".into(), "0.0".into()]],
+            asks: vec![],
+            timestamp: "0".to_string(),
+            microtimestamp: "0".to_string(),
+        });
+        assert_eq!(
+            book.num_bids(),
+            0,
+            "zero-amount bid level must be removed, not retained as 0-size"
+        );
+    }
+
+    #[test]
+    fn test_apply_orderbook_zero_amount_removes_ask_level() {
+        let mut book = OrderBook::new();
+        // Seed with an ask at 101.0, size 2.0
+        book.apply_orderbook(&OrderBookData {
+            bids: vec![],
+            asks: vec![vec!["101.0".into(), "2.0".into()]],
+            timestamp: "0".to_string(),
+            microtimestamp: "0".to_string(),
+        });
+        assert_eq!(book.num_asks(), 1);
+
+        // Apply a delta that sets the same price to 0 amount (deletion marker)
+        book.apply_orderbook(&OrderBookData {
+            bids: vec![],
+            asks: vec![vec!["101.0".into(), "0.0".into()]],
+            timestamp: "0".to_string(),
+            microtimestamp: "0".to_string(),
+        });
+        assert_eq!(
+            book.num_asks(),
+            0,
+            "zero-amount ask level must be removed, not retained as 0-size"
+        );
+    }
+
+    #[test]
+    fn test_apply_orderbook_zero_amount_only_removes_target_level() {
+        let mut book = OrderBook::new();
+        // Seed: bids at 100.0 (1.5) and 99.0 (2.0)
+        book.apply_orderbook(&OrderBookData {
+            bids: vec![
+                vec!["100.0".into(), "1.5".into()],
+                vec!["99.0".into(), "2.0".into()],
+            ],
+            asks: vec![],
+            timestamp: "0".to_string(),
+            microtimestamp: "0".to_string(),
+        });
+        assert_eq!(book.num_bids(), 2);
+
+        // Zero out only the 100.0 level
+        book.apply_orderbook(&OrderBookData {
+            bids: vec![vec!["100.0".into(), "0.0".into()]],
+            asks: vec![],
+            timestamp: "0".to_string(),
+            microtimestamp: "0".to_string(),
+        });
+        assert_eq!(
+            book.num_bids(),
+            1,
+            "only the zeroed level should be removed"
+        );
+        assert_eq!(book.best_bid(), Some(99.0));
     }
 }
