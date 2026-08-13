@@ -73,6 +73,8 @@ struct ResilienceCli {
     silence_timeout_secs: Option<u64>,
     #[clap(long, default_value_t = false)]
     debug_log: bool,
+    #[clap(long)]
+    silence_reconnect_timeout_secs: Option<u64>,
 }
 
 fn parse_data_kind(s: &str) -> DataKind {
@@ -131,6 +133,7 @@ async fn main() {
                 max_attempts: cli.resilience.max_attempts,
                 silence_timeout_secs: cli.resilience.silence_timeout_secs,
                 debug_log: cli.resilience.debug_log,
+                silence_reconnect_timeout_secs: cli.resilience.silence_reconnect_timeout_secs,
             },
             fallback: HashMap::new(),
             api_key: cli.api_key,

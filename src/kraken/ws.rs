@@ -35,6 +35,7 @@ pub fn display_message(msg: &KrakenWsMessage) -> String {
 }
 
 /// Kraken exchange adapter.
+#[derive(Clone)]
 pub struct KrakenAdapter {
     pub instrument: String,
     pub region: String,
@@ -245,6 +246,23 @@ impl ExchangeAdapter for KrakenAdapter {
         );
         self.reset_local();
         Ok(vec![])
+    }
+
+    fn fresh_adapter(&self) -> Self {
+        KrakenAdapter::new(
+            self.instrument.clone(),
+            self.region.clone(),
+            self.max_level_pct,
+            self.max_level,
+            self.data_kind,
+            self.checksum_log,
+            self.crossguard_log,
+        )
+    }
+
+    fn subscription_confirmed(&mut self, msg: &Self::Message) -> bool {
+        // Kraken sends `{"method":"subscribe","success":true}` to confirm.
+        msg.method.as_deref() == Some("subscribe") && msg.success == Some(true)
     }
 }
 

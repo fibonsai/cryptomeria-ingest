@@ -410,6 +410,20 @@ impl ExchangeAdapter for BitstampAdapter {
         }
     }
 
+    fn fresh_adapter(&self) -> Self {
+        BitstampAdapter::new(
+            self.instrument.clone(),
+            self.exchange.clone(),
+            self.region.clone(),
+            self.cli_instrument.clone(),
+            self.max_level_pct,
+            self.max_level,
+            self.data_kind,
+            self.checksum_log,
+            self.snapshot_delay,
+        )
+    }
+
     fn snapshot_needed(&self) -> bool {
         self.snapshot_requested
     }
