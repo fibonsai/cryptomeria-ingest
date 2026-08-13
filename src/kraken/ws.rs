@@ -217,6 +217,18 @@ impl ExchangeAdapter for KrakenAdapter {
         )
     }
 
+    fn keepalive_interval_ms(&self) -> u64 {
+        6000
+    }
+
+    fn ping_msg(&self) -> Option<String> {
+        Some(r#"{"method":"ping"}"#.to_string())
+    }
+
+    fn is_pong(&self, msg: &Self::Message) -> bool {
+        msg.method.as_deref() == Some("pong")
+    }
+
     fn url(&self) -> String {
         crate::urls::websocket_url(&self.region, "kraken").to_string()
     }
@@ -371,6 +383,37 @@ mod tests {
         let a = adapter();
         let msg: KrakenWsMessage = serde_json::from_str(r#"{"method":"ping"}"#).unwrap();
         assert!(a.handle_heartbeat(&msg));
+    }
+
+    #[test]
+    fn test_keepalive_interval_ms() {
+        let a = adapter();
+        assert_eq!(a.keepalive_interval_ms(), 6000);
+    }
+
+    #[test]
+    fn test_ping_msg() {
+        let a = adapter();
+        let msg = a.ping_msg().expect("Kraken should have an app-level ping");
+        let v: serde_json::Value = serde_json::from_str(&msg).unwrap();
+        assert_eq!(v["method"], "ping");
+    }
+
+    #[test]
+    fn test_is_pong_true_for_pong_method() {
+        let a = adapter();
+        let msg: KrakenWsMessage = serde_json::from_str(r#"{"method":"pong"}"#).unwrap();
+        assert!(a.is_pong(&msg));
+    }
+
+    #[test]
+    fn test_is_pong_false_for_subscribe_event() {
+        let a = adapter();
+        let msg: KrakenWsMessage = serde_json::from_str(
+            r#"{"method":"subscribe","result":{"channel":"book","symbol":"XBT/USD"},"success":true,"req_id":1}"#,
+        )
+        .unwrap();
+        assert!(!a.is_pong(&msg));
     }
 
     #[test]

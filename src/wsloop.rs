@@ -14,6 +14,21 @@ use tokio_tungstenite::tungstenite::Message;
 /// never fires, keeping the 3-branch `select!` structure uniform.
 const DISABLED_SILENCE_SECS: u64 = 86_400 * 365; // ~1 year
 
+/// Maximum number of missed ping/pong cycles before raising `RequestTimeout`.
+/// After `keepalive_interval * MAX_PING_PONG_MISSES` with no pong the
+/// connection is considered dead.
+const MAX_PING_PONG_MISSES: f64 = 2.0;
+
+/// Compute the pong-timeout `Duration` from a keepalive interval (ms).
+///
+/// The timeout is `keepalive_ms * MAX_PING_PONG_MISSES` — if no pong has been
+/// received within this duration, the connection is considered stalled and
+/// `IngestError::RequestTimeout` is raised.
+pub fn keepalive_timeout(keepalive_ms: u64) -> Duration {
+    let ms = (keepalive_ms as f64 * MAX_PING_PONG_MISSES) as u64;
+    Duration::from_millis(ms)
+}
+
 /// Compute the `Duration` for the silence-timeout sleep.
 ///
 /// When `Some(secs)`, returns `Duration::from_secs(secs)`.
@@ -208,6 +223,34 @@ pub trait ExchangeAdapter: Send + 'static {
     /// Whether the message is a heartbeat/ping that should elicit a pong.
     /// Return true if the adapter wants to respond to this message.
     fn handle_heartbeat(&self, msg: &Self::Message) -> bool;
+
+    /// Keepalive ping interval in milliseconds.
+    ///
+    /// Controls how often the wsloop sends a keepalive ping to the exchange.
+    /// Default: 5000 (18000 for OKX, 6000 for Kraken).
+    fn keepalive_interval_ms(&self) -> u64 {
+        5000
+    }
+
+    /// Exchange-specific application-level ping message to send periodically.
+    ///
+    /// When `Some(msg)`, the wsloop sends `Message::Text(msg)` every
+    /// `keepalive_interval_ms`. When `None`, the wsloop sends a raw
+    /// WebSocket-level `Message::Ping` frame (default — Bitstamp, Bitvavo).
+    fn ping_msg(&self) -> Option<String> {
+        None
+    }
+
+    /// Whether a parsed text message is a pong response to our keepalive ping.
+    ///
+    /// Called for every received `Message::Text`; return `true` when the message
+    /// is a pong (e.g. OKX `{"event":"pong"}`, Kraken `{"method":"pong"}`).
+    /// Default: `false` (raw ws-level ping exchanges detect pong at the
+    /// `Message::Pong` level, handled by the wsloop).
+    fn is_pong(&self, msg: &Self::Message) -> bool {
+        let _ = msg;
+        false
+    }
 
     /// Optional async hook called after reconnection to fetch a snapshot (e.g. Bitstamp).
     /// Returns a vector of initial market data items (usually a single LobItem snapshot).
@@ -480,6 +523,22 @@ where
             let silence_sleep = tokio::time::sleep(silence_duration);
             tokio::pin!(silence_sleep);
 
+            // Keepalive/ping setup.
+            //
+            // Send a ping (app-level JSON or raw ws-level frame) every
+            // `keepalive_interval`. Track the time of the last received pong.
+            // If `last_pong.elapsed() > keepalive_interval * MAX_PING_PONG_MISSES`
+            // (i.e., `lastPong + keepAlive * 2 < now`), raise RequestTimeout
+            // and break to the reconnect path.
+            let keepalive_ms = adapter.keepalive_interval_ms();
+            let keepalive_interval = Duration::from_millis(keepalive_ms);
+            let ping_timeout = keepalive_timeout(keepalive_ms);
+            let ping_msg = adapter.ping_msg();
+            let mut last_pong = tokio::time::Instant::now();
+
+            let ping_sleep = tokio::time::sleep(keepalive_interval);
+            tokio::pin!(ping_sleep);
+
             // Main read loop.
             'read: loop {
                 tokio::select! {
@@ -494,8 +553,12 @@ where
                             Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) => {
                                 // Parse and handle the message.
                                 match adapter.parse_message(&text) {
-                                    Ok(parsed) => {
-                                        // Heartbeat handling.
+                        Ok(parsed) => {
+                                         // Check for pong response to our keepalive ping (app-level).
+                                         if adapter.is_pong(&parsed) {
+                                             last_pong = tokio::time::Instant::now();
+                                         }
+                                         // Heartbeat handling.
                                         if adapter.handle_heartbeat(&parsed) {
                                             // Respond with pong if needed – the tungstenite
                                             // library handles websocket-level pings/pongs
@@ -526,7 +589,8 @@ where
                                 // tungstenite handles ping/pong automatically at the ws level.
                             }
                             Some(Ok(tokio_tungstenite::tungstenite::Message::Pong(_))) => {
-                                // pong
+                                // Raw ws-level pong received — update keepalive tracking.
+                                last_pong = tokio::time::Instant::now();
                             }
                             Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))) => {
                                 info!("[WS received close frame] exchange={exchange} instrument={instrument} channel={channel_names}");
@@ -547,6 +611,58 @@ where
                     _ = tx.closed() => {
                         info!("[Receiver dropped, shutting down] exchange={exchange} instrument={instrument}");
                         break 'read;
+                    }
+                    // Keepalive ping timer: send a ping every `keepalive_interval`.
+                    // If no pong has been received within `keepalive_interval * 2`,
+                    // raise RequestTimeout and break to reconnect.
+                    _ = &mut ping_sleep => {
+                        if last_pong.elapsed() > ping_timeout {
+                            warn!(
+                                "[WS keepalive timeout] exchange={exchange} instrument={instrument} channel={channel_names} last_pong_ms={} timeout_ms={}",
+                                last_pong.elapsed().as_millis(),
+                                ping_timeout.as_millis()
+                            );
+                            let _ = tx
+                                .send(Err(IngestError::RequestTimeout(format!(
+                                    "no pong received within {}ms (keepalive={}ms) for exchange={} instrument={}",
+                                    ping_timeout.as_millis(),
+                                    keepalive_interval.as_millis(),
+                                    exchange,
+                                    instrument
+                                ))))
+                                .await;
+                            break 'read;
+                        }
+                        // Send keepalive ping.
+                        if let Some(ref msg) = ping_msg {
+                            match write.send(Message::Text(msg.clone())).await {
+                                Ok(()) => {
+                                    debug!(
+                                        "[WS keepalive ping sent] exchange={exchange} instrument={instrument}"
+                                    );
+                                }
+                                Err(e) => {
+                                    error!(
+                                        "[WS keepalive ping send failed] exchange={exchange} instrument={instrument} channel={channel_names} error={e}"
+                                    );
+                                    break 'read;
+                                }
+                            }
+                        } else {
+                            // Raw ws-level ping.
+                            if let Err(e) = write.send(Message::Ping(vec![])).await {
+                                error!(
+                                    "[WS keepalive ping send failed] exchange={exchange} instrument={instrument} channel={channel_names} error={e}"
+                                );
+                                break 'read;
+                            }
+                            debug!(
+                                "[WS keepalive ping sent] exchange={exchange} instrument={instrument}"
+                            );
+                        }
+                        ping_sleep.as_mut().reset(
+                            tokio::time::Instant::now() + keepalive_interval
+                        );
                     }
                     // Silence timeout: channel has not received any message
                     // within the configured window. Treat as a connection
@@ -673,6 +789,27 @@ mod tests {
         let d = silence_sleep_duration(None);
         assert_eq!(d, Duration::from_secs(DISABLED_SILENCE_SECS));
         assert!(d > Duration::from_secs(86400)); // at least one day
+    }
+
+    #[test]
+    fn test_keepalive_timeout_okx() {
+        // OKX keepalive = 18000ms → timeout = 18000 * 2 = 36000ms
+        let d = keepalive_timeout(18000);
+        assert_eq!(d, Duration::from_millis(36000));
+    }
+
+    #[test]
+    fn test_keepalive_timeout_kraken() {
+        // Kraken keepalive = 6000ms → timeout = 6000 * 2 = 12000ms
+        let d = keepalive_timeout(6000);
+        assert_eq!(d, Duration::from_millis(12000));
+    }
+
+    #[test]
+    fn test_keepalive_timeout_default() {
+        // Default keepalive = 5000ms → timeout = 5000 * 2 = 10000ms
+        let d = keepalive_timeout(5000);
+        assert_eq!(d, Duration::from_millis(10000));
     }
 
     #[tokio::test]

@@ -97,6 +97,8 @@ pub enum IngestError {
     Heartbeat(String),
     /// WebSocket channel was silent for longer than the configured timeout.
     SilenceTimeout(u64),
+    /// Keepalive ping timeout — no pong received within `keepAlive * maxPingPongMisses`.
+    RequestTimeout(String),
     /// Exchange-specific error.
     Exchange(String),
     /// I/O error.
@@ -116,6 +118,7 @@ impl fmt::Display for IngestError {
             IngestError::ChannelClosed => write!(f, "channel closed"),
             IngestError::Heartbeat(s) => write!(f, "heartbeat error: {s}"),
             IngestError::SilenceTimeout(s) => write!(f, "silence timeout after {s}s"),
+            IngestError::RequestTimeout(s) => write!(f, "request timeout: {s}"),
             IngestError::Exchange(s) => write!(f, "exchange error: {s}"),
             IngestError::Io(s) => write!(f, "I/O error: {s}"),
         }
@@ -257,6 +260,10 @@ mod tests {
         assert_eq!(
             IngestError::SilenceTimeout(30).to_string(),
             "silence timeout after 30s"
+        );
+        assert_eq!(
+            IngestError::RequestTimeout("no pong in 36000ms".into()).to_string(),
+            "request timeout: no pong in 36000ms"
         );
     }
 
