@@ -558,12 +558,8 @@ where
                 tokio::select! {
                     biased;
                     // Read a WebSocket message.
-                    msg = read.next() => {
-                        // Any received message resets the silence timer.
-                        silence_sleep.as_mut().reset(
-                            tokio::time::Instant::now() + silence_duration
-                        );
-                        match msg {
+                     msg = read.next() => {
+                         match msg {
                             Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) => {
                                 // Parse and handle the message.
                                 match adapter.parse_message(&text) {
@@ -584,9 +580,15 @@ where
                                             // automatically, so we just ignore here.
                                         }
                                         // Pass to adapter for processing.
-                                        if let Some(item) = adapter.handle_message(&parsed) {
-                                            // Send the item to the receiver.
-                                            if tx.send(Ok(item)).await.is_err() {
+                                         if let Some(item) = adapter.handle_message(&parsed) {
+                                             // Only actual market data (Lob/Trade) resets the
+                                             // silence timer; pongs, heartbeats, and other
+                                             // protocol noise do not count as channel activity.
+                                             silence_sleep.as_mut().reset(
+                                                 tokio::time::Instant::now() + silence_duration
+                                             );
+                                             // Send the item to the receiver.
+                                             if tx.send(Ok(item)).await.is_err() {
                                                 // Receiver dropped – shutdown.
                                                 break 'read;
                                             }
@@ -709,9 +711,11 @@ where
                             tokio::time::Instant::now() + keepalive_interval
                         );
                     }
-                    // Silence timeout: channel has not received any message
-                    // within the configured window. Treat as a connection
-                    // failure and fall through to the existing reconnect path.
+                    // Silence timeout: no `MarketDataItem` (Lob/Trade) has been
+                    // received within the configured window. Protocol traffic
+                    // such as pongs, heartbeats, and binary frames does not count
+                    // as channel activity. Treat as a connection failure and
+                    // fall through to the existing reconnect path.
                     _ = &mut silence_sleep => {
                         if let Some(secs) = silence_timeout_secs {
                             warn!(
@@ -1129,5 +1133,195 @@ mod tests {
             url: "ws://127.0.0.1:1".to_string(),
         };
         assert_eq!(adapter.auth_confirmation_timeout(), None);
+    }
+
+    // ------------------------------------------------------------------
+    // Silence timer: only Lob/Trade events reset the silence timer
+    // ------------------------------------------------------------------
+
+    /// Mock adapter for silence-timer tests.
+    ///
+    /// `handle_message` returns `Some(Trade)` only for `{"type":"trade"}`.
+    /// Pongs (`{"event":"pong"}`), heartbeats, and everything else return `None`.
+    struct SilenceTestAdapter {
+        url: String,
+    }
+
+    impl ExchangeAdapter for SilenceTestAdapter {
+        type Message = serde_json::Value;
+
+        fn instrument(&self) -> &str {
+            "btcusd"
+        }
+
+        fn exchange(&self) -> &'static str {
+            "bitstamp"
+        }
+
+        fn url(&self) -> String {
+            self.url.clone()
+        }
+
+        fn subscribe_msgs(&self) -> Vec<(String, String)> {
+            vec![("test_channel".to_string(), "{}".to_string())]
+        }
+
+        fn parse_message(&self, text: &str) -> Result<Self::Message, String> {
+            serde_json::from_str(text).map_err(|e| e.to_string())
+        }
+
+        fn handle_message(&mut self, msg: &Self::Message) -> Option<MarketDataItem> {
+            // Only "trade" messages produce a MarketDataItem.
+            if msg.get("type").and_then(|v| v.as_str()) == Some("trade") {
+                Some(MarketDataItem::Trade(crate::items::TradeItem {
+                    ts: 0,
+                    exchange: "test".to_string(),
+                    price: 1.0,
+                    size: 1.0,
+                    side: "buy".to_string(),
+                    trade_id: None,
+                    seq_id: None,
+                }))
+            } else {
+                None
+            }
+        }
+
+        fn handle_heartbeat(&self, _msg: &Self::Message) -> bool {
+            false
+        }
+
+        fn is_pong(&self, msg: &Self::Message) -> bool {
+            msg.get("event").and_then(|v| v.as_str()) == Some("pong")
+        }
+
+        fn keepalive_interval_ms(&self) -> u64 {
+            100_000 // large to avoid keepalive timeout during tests
+        }
+
+        fn ping_msg(&self) -> Option<String> {
+            None
+        }
+    }
+
+    /// Start a mock WebSocket server that sends `msg` every `interval_ms`.
+    /// Returns the `ws://` URL to connect to.
+    async fn spawn_mock_ws_server(msg: String, interval_ms: u64) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("ws://127.0.0.1:{}", addr.port());
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let ws_stream = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let (mut write, mut read) = ws_stream.split();
+
+            // Discard incoming messages (subscribe msgs) so the client doesn't block.
+            tokio::spawn(async move { while read.next().await.is_some() {} });
+
+            // Send messages at interval until the client disconnects.
+            loop {
+                tokio::time::sleep(Duration::from_millis(interval_ms)).await;
+                if write.send(Message::Text(msg.clone())).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        // Give the server a moment to start listening.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        url
+    }
+
+    fn silence_test_config(
+        url: String,
+        silence_secs: u64,
+    ) -> (crate::config::DataSourceConfig, SilenceTestAdapter) {
+        let config = crate::config::DataSourceConfig {
+            exchange: "bitstamp".to_string(),
+            region: "global".to_string(),
+            instrument: "BTCUSD".to_string(),
+            data_kind: crate::config::DataKind::LOB | crate::config::DataKind::TRADE,
+            max_level: None,
+            max_level_pct: 0.0,
+            alias: None,
+            checksum_log: false,
+            crossguard_log: false,
+            fallback: std::collections::HashMap::new(),
+            api_key: None,
+            api_secret: None,
+            resilience: ResilienceConfig {
+                initial_backoff_ms: 1,
+                silence_timeout_secs: Some(silence_secs),
+                max_attempts: Some(1),
+                ..Default::default()
+            },
+        };
+        let adapter = SilenceTestAdapter { url };
+        (config, adapter)
+    }
+
+    #[tokio::test]
+    async fn test_silence_timeout_fires_when_only_pongs() {
+        // Mock server sends only pong messages every 100ms. Pongs should NOT
+        // reset the silence timer, so after silence_timeout_secs the timer fires,
+        // causing a reconnect attempt that exhausts max_attempts.
+        let url = spawn_mock_ws_server(r#"{"event":"pong"}"#.to_string(), 100).await;
+
+        let (config, adapter) = silence_test_config(url, 1);
+        let mut handle = run_exchange_stream(config, adapter).await.unwrap();
+
+        // With max_attempts=1 and silence_timeout_secs=1, pongs don't reset
+        // the silence timer, so after ~1s the silence timeout fires, the
+        // reconnect exhausts max_attempts, and MaxReconnectsExceeded(1)
+        // surfaces through the channel.
+        let item = tokio::time::timeout(Duration::from_secs(5), handle.stream.next())
+            .await
+            .expect("silence timeout should fire within 5s; pongs must not reset timer")
+            .expect("stream should emit an item after silence timeout");
+        assert!(
+            matches!(item, Err(IngestError::MaxReconnectsExceeded(1))),
+            "expected MaxReconnectsExceeded(1) after silence timeout with pongs, got: {:?}",
+            item
+        );
+    }
+
+    #[tokio::test]
+    async fn test_market_data_resets_silence_timer() {
+        // Mock server sends actual trade data every 200ms. Trade events SHOULD
+        // reset the silence timer, so no error should surface within the
+        // silence window — the silence timer keeps getting pushed back.
+        let url = spawn_mock_ws_server(r#"{"type":"trade"}"#.to_string(), 200).await;
+
+        let (config, adapter) = silence_test_config(url, 1);
+        let mut handle = run_exchange_stream(config, adapter).await.unwrap();
+
+        // With trade data every 200ms and silence_timeout_secs=1, the silence
+        // timer should keep getting reset. No error should surface.
+        // Collect items for ~3s (3x the silence window) and verify all are
+        // Ok(Trade) — never an error.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        let mut got_trade = false;
+        loop {
+            match tokio::time::timeout_at(deadline, handle.stream.next()).await {
+                Ok(Some(Ok(item))) => {
+                    assert!(
+                        matches!(item, MarketDataItem::Trade(_)),
+                        "expected Trade item, got: {:?}",
+                        item
+                    );
+                    got_trade = true;
+                }
+                Ok(Some(Err(e))) => {
+                    panic!("expected no error while trade data flows, got: {:?}", e);
+                }
+                Ok(None) => break, // stream ended
+                Err(_) => break,   // timeout — no more data
+            }
+        }
+        assert!(
+            got_trade,
+            "should have received at least one Trade item within the silence window"
+        );
     }
 }
