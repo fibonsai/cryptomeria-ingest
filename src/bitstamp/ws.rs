@@ -420,7 +420,10 @@ impl ExchangeAdapter for BitstampAdapter {
             self.max_level,
             self.data_kind,
             self.checksum_log,
+            self.snapshot_delay,
         )
+    }
+
     fn snapshot_needed(&self) -> bool {
         self.snapshot_requested
     }

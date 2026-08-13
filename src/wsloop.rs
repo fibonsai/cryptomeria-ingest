@@ -316,7 +316,6 @@ pub trait ExchangeAdapter: Send + 'static {
     /// Optional async hook called after reconnection to fetch a snapshot (e.g. Bitstamp).
     /// Returns a vector of initial market data items (usually a single LobItem snapshot).
     /// Default implementation returns Ok(vec![]).
-    #[allow(clippy::manual_async_fn)]
     fn on_reconnect(
         &mut self,
     ) -> impl std::future::Future<Output = Result<Vec<MarketDataItem>, String>> + Send {
@@ -353,27 +352,7 @@ pub trait ExchangeAdapter: Send + 'static {
         let _ = msg;
         false
     }
-}
 
-/// Parameters extracted from [`ResilienceConfig`] for the wsloop.
-#[derive(Clone)]
-struct WsLoopParams {
-    resilience: ResilienceConfig,
-    max_attempts: Option<u64>,
-    silence_timeout_secs: Option<u64>,
-    silence_reconnect_timeout_secs: Option<u64>,
-    debug_log: bool,
-}
-
-impl WsLoopParams {
-    fn from_config(config: &crate::config::DataSourceConfig) -> Self {
-        WsLoopParams {
-            resilience: config.resilience.clone(),
-            max_attempts: normalize_max_attempts(config.resilience.max_attempts),
-            silence_timeout_secs: config.resilience.silence_timeout_secs,
-            silence_reconnect_timeout_secs: config.resilience.silence_reconnect_timeout_secs,
-            debug_log: config.resilience.debug_log,
-        }
     /// Whether the adapter has buffered enough deltas and is requesting a
     /// snapshot fetch + merge. Called by the wsloop after each
     /// `handle_message` returns.
@@ -397,6 +376,28 @@ impl WsLoopParams {
         &mut self,
     ) -> impl std::future::Future<Output = Result<Vec<MarketDataItem>, String>> + Send {
         async { Ok(vec![]) }
+    }
+}
+
+/// Parameters extracted from [`ResilienceConfig`] for the wsloop.
+#[derive(Clone)]
+struct WsLoopParams {
+    resilience: ResilienceConfig,
+    max_attempts: Option<u64>,
+    silence_timeout_secs: Option<u64>,
+    silence_reconnect_timeout_secs: Option<u64>,
+    debug_log: bool,
+}
+
+impl WsLoopParams {
+    fn from_config(config: &crate::config::DataSourceConfig) -> Self {
+        WsLoopParams {
+            resilience: config.resilience.clone(),
+            max_attempts: normalize_max_attempts(config.resilience.max_attempts),
+            silence_timeout_secs: config.resilience.silence_timeout_secs,
+            silence_reconnect_timeout_secs: config.resilience.silence_reconnect_timeout_secs,
+            debug_log: config.resilience.debug_log,
+        }
     }
 }
 
@@ -547,7 +548,7 @@ where
                                 Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) => {
                                     match adapter.parse_message(&text) {
                                         Ok(parsed) => {
-                                            if adapter.handle_heartbeat(&parsed) {}
+                                            let _ = adapter.handle_heartbeat(&parsed);
                                             if adapter.is_auth_confirmed(&parsed) {
                                                 info!(
                                                     "[WS auth confirmed] exchange={exchange} instrument={instrument} channel=auth"
@@ -667,6 +668,25 @@ where
         }
         attempt = 0;
 
+        // Optional on_connect hook: fetch a snapshot before the read loop
+        // (e.g. Bitstamp delta-buffering initial seed, or any exchange that
+        // needs to seed its book via REST before consuming deltas).
+        match adapter.on_connect().await {
+            Ok(items) => {
+                for item in items {
+                    if tx.send(Ok(item)).await.is_err() {
+                        // Receiver dropped.
+                        break 'outer Err(IngestError::ChannelClosed);
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(
+                    "[WS on_connect hook failed] exchange={exchange} instrument={instrument} channel={channel_names} error={e}"
+                );
+            }
+        }
+
         // --- Graceful replacement (fork-and-replace) state (ADR-027) ---
         let replacement_confirmed_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let replacement_confirmed_flag_clone = Arc::clone(&replacement_confirmed_flag);
@@ -686,8 +706,6 @@ where
         let ping_sleep = tokio::time::sleep(keepalive_interval);
         tokio::pin!(ping_sleep);
 
-        let debug_log = debug_log;
-
         // Phase 1: main read loop with silence detection.
         'read: loop {
             tokio::select! {
@@ -697,126 +715,11 @@ where
                         Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) => {
                             match adapter.parse_message(&text) {
                                 Ok(parsed) => {
-                                    if let Some(ref flag) = confirmed_flag {
-                                        if !flag.load(std::sync::atomic::Ordering::SeqCst)
-                                            && adapter.subscription_confirmed(&parsed)
-                                        {
-                                            flag.store(true, std::sync::atomic::Ordering::SeqCst);
-                                        }
-            attempt = 0; // reset attempt counter on successful connect
-
-            // Optional on_connect hook: fetch a snapshot before the read loop
-            // (e.g. Bitstamp delta-buffering initial seed, or any exchange that
-            // needs to seed its book via REST before consuming deltas).
-            match adapter.on_connect().await {
-                Ok(items) => {
-                    for item in items {
-                        if tx.send(Ok(item)).await.is_err() {
-                            // Receiver dropped.
-                            break 'outer Err(IngestError::ChannelClosed);
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn!(
-                        "[WS on_connect hook failed] exchange={exchange} instrument={instrument} channel={channel_names} error={e}"
-                    );
-                }
-            }
-
-            // Silence timeout timer — reset on every received message so any
-            // WebSocket traffic (data, heartbeat, ping/pong) counts as activity.
-            // When `silence_timeout_secs` is `None`, the sentinel duration is
-            // effectively infinite and the timer branch never fires.
-            let silence_duration = silence_sleep_duration(silence_timeout_secs);
-            let silence_sleep = tokio::time::sleep(silence_duration);
-            tokio::pin!(silence_sleep);
-
-            // Keepalive/ping setup.
-            //
-            // Send a ping (app-level JSON or raw ws-level frame) every
-            // `keepalive_interval`. Track the time of the last received pong.
-            // If `last_pong.elapsed() > keepalive_interval * MAX_PING_PONG_MISSES`
-            // (i.e., `lastPong + keepAlive * 2 < now`), raise RequestTimeout
-            // and break to the reconnect path.
-            let keepalive_ms = adapter.keepalive_interval_ms();
-            let keepalive_interval = Duration::from_millis(keepalive_ms);
-            let ping_timeout = keepalive_timeout(keepalive_ms);
-            let ping_msg = adapter.ping_msg();
-            let mut last_pong = tokio::time::Instant::now();
-
-            let ping_sleep = tokio::time::sleep(keepalive_interval);
-            tokio::pin!(ping_sleep);
-
-            // Per-message debug logs (ping/pong, binary/frame, parse failures) are
-            // high-frequency; gate them behind `debug_log` to avoid flooding.
-            let debug_log = resilience.debug_log;
-
-            // Main read loop.
-            'read: loop {
-                tokio::select! {
-                    biased;
-                    // Read a WebSocket message.
-                     msg = read.next() => {
-                         match msg {
-                            Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) => {
-                                // Parse and handle the message.
-                                match adapter.parse_message(&text) {
-                        Ok(parsed) => {
-                                         // Check for pong response to our keepalive ping (app-level).
-                                         if adapter.is_pong(&parsed) {
-                                             last_pong = tokio::time::Instant::now();
-                                             if should_log_debug(debug_log, log::log_enabled!(log::Level::Debug)) {
-                                                 debug!(
-                                                     "[WS keepalive pong received (app-level)] exchange={exchange} instrument={instrument} channel={channel_names}"
-                                                 );
-                                             }
-                                         }
-                                         // Heartbeat handling.
-                                        if adapter.handle_heartbeat(&parsed) {
-                                            // Respond with pong if needed – the tungstenite
-                                            // library handles websocket-level pings/pongs
-                                            // automatically, so we just ignore here.
-                                        }
-                                         // Pass to adapter for processing.
-                                          if let Some(item) = adapter.handle_message(&parsed) {
-                                              // Only actual market data (Lob/Trade) resets the
-                                              // silence timer; pongs, heartbeats, and other
-                                              // protocol noise do not count as channel activity.
-                                              silence_sleep.as_mut().reset(
-                                                  tokio::time::Instant::now() + silence_duration
-                                              );
-                                              // Send the item to the receiver.
-                                              if tx.send(Ok(item)).await.is_err() {
-                                                 // Receiver dropped – shutdown.
-                                                 break 'read;
-                                             }
-                                         }
-                                         // Poll for snapshot-fetch coordination: if the adapter
-                                         // has buffered enough deltas (or otherwise signals it
-                                         // is ready), call fetch_snapshot_and_merge and forward
-                                         // the resulting items. The adapter may have buffered
-                                         // deltas that were not themselves emitted (buffered
-                                         // for merge), so this is checked every iteration.
-                                         if adapter.snapshot_needed() {
-                                             match adapter.fetch_snapshot_and_merge().await {
-                                                 Ok(items) => {
-                                                     for item in items {
-                                                         silence_sleep.as_mut().reset(
-                                                             tokio::time::Instant::now() + silence_duration
-                                                         );
-                                                         if tx.send(Ok(item)).await.is_err() {
-                                                             break 'read;
-                                                         }
-                                                     }
-                                                 }
-                                                 Err(e) => {
-                                                     warn!(
-                                                         "[WS snapshot fetch failed] exchange={exchange} instrument={instrument} channel={channel_names} error={e}"
-                                                     );
-                                                 }
-                                             }
-                                         }
+                                    if let Some(ref flag) = confirmed_flag
+                                    && !flag.load(std::sync::atomic::Ordering::SeqCst)
+                                        && adapter.subscription_confirmed(&parsed)
+                                    {
+                                        flag.store(true, std::sync::atomic::Ordering::SeqCst);
                                     }
                                     if adapter.is_pong(&parsed) {
                                         last_pong = tokio::time::Instant::now();
@@ -826,18 +729,43 @@ where
                                             );
                                         }
                                     }
-                                    if adapter.handle_heartbeat(&parsed) {}
+                                    let _ = adapter.handle_heartbeat(&parsed);
                                     if let Some(item) = adapter.handle_message(&parsed) {
-                                        if let Some(ref flag) = confirmed_flag {
-                                            if !flag.load(std::sync::atomic::Ordering::SeqCst) {
-                                                flag.store(true, std::sync::atomic::Ordering::SeqCst);
-                                            }
+                                        if let Some(ref flag) = confirmed_flag
+                                            && !flag.load(std::sync::atomic::Ordering::SeqCst)
+                                        {
+                                            flag.store(true, std::sync::atomic::Ordering::SeqCst);
                                         }
                                         silence_sleep.as_mut().reset(
                                             tokio::time::Instant::now() + silence_duration
                                         );
                                         if tx.send(Ok(item)).await.is_err() {
                                             break 'read;
+                                        }
+                                    }
+                                    // Poll for snapshot-fetch coordination: if the adapter
+                                    // has buffered enough deltas (or otherwise signals it
+                                    // is ready), call fetch_snapshot_and_merge and forward
+                                    // the resulting items. The adapter may have buffered
+                                    // deltas that were not themselves emitted (buffered
+                                    // for merge), so this is checked every iteration.
+                                    if adapter.snapshot_needed() {
+                                        match adapter.fetch_snapshot_and_merge().await {
+                                            Ok(items) => {
+                                                for item in items {
+                                                    silence_sleep.as_mut().reset(
+                                                        tokio::time::Instant::now() + silence_duration
+                                                    );
+                                                    if tx.send(Ok(item)).await.is_err() {
+                                                        break 'read;
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => {
+                                                warn!(
+                                                    "[WS snapshot fetch failed] exchange={exchange} instrument={instrument} channel={channel_names} error={e}"
+                                                );
+                                            }
                                         }
                                     }
                                 }
@@ -1012,10 +940,10 @@ where
                                     if adapter.is_pong(&parsed) {
                                         last_pong = tokio::time::Instant::now();
                                     }
-                                    if let Some(item) = adapter.handle_message(&parsed) {
-                                        if tx.send(Ok(item)).await.is_err() {
-                                            break 'replacement;
-                                        }
+                                    if let Some(item) = adapter.handle_message(&parsed)
+                                        && tx.send(Ok(item)).await.is_err()
+                                    {
+                                        break 'replacement;
                                     }
                                 }
                             }
@@ -1766,6 +1694,13 @@ mod tests {
                 })])
             }
         }
+
+        fn fresh_adapter(&self) -> Self {
+            OnConnectAdapter {
+                url: self.url.clone(),
+                on_connect_called: false,
+            }
+        }
     }
 
     #[tokio::test]
@@ -1883,6 +1818,13 @@ mod tests {
                     bids: vec![],
                     asks: vec![],
                 })])
+            }
+        }
+
+        fn fresh_adapter(&self) -> Self {
+            SnapshotPollingAdapter {
+                url: self.url.clone(),
+                msg_count: Arc::clone(&self.msg_count),
             }
         }
     }
