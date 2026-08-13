@@ -121,6 +121,13 @@ pub struct ResilienceConfig {
     /// `None` disables silence detection.
     #[serde(default)]
     pub silence_timeout_secs: Option<u64>,
+    /// When `true`, emit high-frequency per-message `debug!` logs (per-ping/per-pong,
+    /// binary/frame messages, parse failures) that would otherwise be silenced to
+    /// avoid flooding on high-throughput channels. Lifecycle logs (connect/subscribe/
+    /// reconnect at `info!`/`warn!`/`error!`) are emitted regardless of this flag.
+    /// Default `false`.
+    #[serde(default)]
+    pub debug_log: bool,
 }
 
 impl Default for ResilienceConfig {
@@ -133,6 +140,7 @@ impl Default for ResilienceConfig {
             heartbeat_interval_secs: None,
             max_attempts: None,
             silence_timeout_secs: None,
+            debug_log: false,
         }
     }
 }
@@ -410,6 +418,45 @@ mod tests {
         assert_eq!(cfg.heartbeat_interval_secs, None);
         assert_eq!(cfg.max_attempts, None);
         assert_eq!(cfg.silence_timeout_secs, None);
+        assert!(
+            !cfg.debug_log,
+            "debug_log must default to false (avoid per-message log flooding)"
+        );
+    }
+
+    #[test]
+    fn test_resilience_config_debug_log_default_false() {
+        let cfg = ResilienceConfig::default();
+        assert!(!cfg.debug_log);
+    }
+
+    #[test]
+    fn test_resilience_config_debug_log_deserialize_omitted_is_false() {
+        // debug_log is optional (serde default); omit it and it should be false.
+        let json = r#"{
+            "initial_backoff_ms": 1000,
+            "max_backoff_ms": 60000,
+            "backoff_multiplier": 2.0,
+            "jitter_ms": 1000
+        }"#;
+        let cfg: ResilienceConfig = serde_json::from_str(json).unwrap();
+        assert!(
+            !cfg.debug_log,
+            "omitted debug_log must deserialize to false"
+        );
+    }
+
+    #[test]
+    fn test_resilience_config_debug_log_deserialize_true() {
+        let json = r#"{
+            "initial_backoff_ms": 1000,
+            "max_backoff_ms": 60000,
+            "backoff_multiplier": 2.0,
+            "jitter_ms": 1000,
+            "debug_log": true
+        }"#;
+        let cfg: ResilienceConfig = serde_json::from_str(json).unwrap();
+        assert!(cfg.debug_log, "debug_log: true must deserialize to true");
     }
 
     #[test]
