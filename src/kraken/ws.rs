@@ -3,7 +3,7 @@ use crate::items::{LobItem, MarketDataItem, TradeItem};
 use crate::kraken::lob::OrderBook;
 use crate::kraken::types::{KrakenWsMessage, MessageType, TradeData};
 use crate::wsloop::ExchangeAdapter;
-use log::{info, warn};
+use log::{debug, info, warn};
 
 /// Subscribe message builder for Kraken.
 pub fn build_subscribe_msg(channel: &str, instrument: &str) -> String {
@@ -201,7 +201,11 @@ impl ExchangeAdapter for KrakenAdapter {
                 None
             }
             MessageType::Event => {
-                info!("[kraken] event: {}", msg.summary());
+                if msg.method.as_deref() == Some("pong") {
+                    debug!("[kraken] event: {}", msg.summary());
+                } else {
+                    info!("[kraken] event: {}", msg.summary());
+                }
                 None
             }
             MessageType::Unknown => {
@@ -764,6 +768,55 @@ mod tests {
             a.book.num_bids(),
             2,
             "book is retained (not wiped by checksum)"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Log-level tests: pong events must be `debug!`, other events `info!`.
+    // Uses the shared test_log_capture logger to avoid conflicts with
+    // other modules that also test log levels.
+    // ------------------------------------------------------------------
+
+    #[test]
+    #[serial_test::serial]
+    fn test_pong_event_not_logged_at_info_level() {
+        crate::test_log_capture::init();
+        // At Info level, debug! messages are filtered before reaching the logger.
+        log::set_max_level(log::LevelFilter::Info);
+        crate::test_log_capture::reset();
+
+        let mut a = adapter();
+        let msg: KrakenWsMessage = serde_json::from_str(r#"{"method":"pong"}"#).unwrap();
+        assert!(a.handle_message(&msg).is_none());
+
+        // Pong is a high-frequency keepalive response already logged at debug
+        // by the wsloop — it must NOT also fire at info level here.
+        assert_eq!(
+            crate::test_log_capture::info_count(),
+            0,
+            "pong event must not be logged at info level"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_non_pong_event_still_logged_at_info_level() {
+        crate::test_log_capture::init();
+        log::set_max_level(log::LevelFilter::Info);
+        crate::test_log_capture::reset();
+
+        let mut a = adapter();
+        let msg: KrakenWsMessage = serde_json::from_str(
+            r#"{"method":"subscribe","result":{"channel":"book","symbol":"XBT/USD"},"success":true,"req_id":1}"#,
+        )
+        .unwrap();
+        assert!(a.handle_message(&msg).is_none());
+
+        // Subscribe confirmations and other non-pong events must remain info.
+        assert_eq!(
+            crate::test_log_capture::info_count(),
+            1,
+            "subscribe event must be logged at info level"
         );
     }
 

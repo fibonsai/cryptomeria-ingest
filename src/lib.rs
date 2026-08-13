@@ -55,3 +55,52 @@ pub use items::{IngestError, LobItem, MarketDataItem, TradeItem};
 pub use stream::stream;
 pub use traits::{LevelVec, LevelsWithinPct, OrderBook};
 pub use urls::{rest_url, websocket_url};
+
+#[cfg(test)]
+pub mod test_log_capture {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static INFO_COUNT: AtomicUsize = AtomicUsize::new(0);
+    static DEBUG_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+    pub fn info_count() -> usize {
+        INFO_COUNT.load(Ordering::SeqCst)
+    }
+
+    pub fn debug_count() -> usize {
+        DEBUG_COUNT.load(Ordering::SeqCst)
+    }
+
+    pub fn reset() {
+        INFO_COUNT.store(0, Ordering::SeqCst);
+        DEBUG_COUNT.store(0, Ordering::SeqCst);
+    }
+
+    struct Logger;
+
+    impl log::Log for Logger {
+        fn enabled(&self, _: &log::Metadata) -> bool {
+            true
+        }
+        fn log(&self, record: &log::Record) {
+            match record.level() {
+                log::Level::Info => {
+                    INFO_COUNT.fetch_add(1, Ordering::SeqCst);
+                }
+                log::Level::Debug => {
+                    DEBUG_COUNT.fetch_add(1, Ordering::SeqCst);
+                }
+                _ => {}
+            }
+        }
+        fn flush(&self) {}
+    }
+
+    static INIT: std::sync::Once = std::sync::Once::new();
+
+    pub fn init() {
+        INIT.call_once(|| {
+            let _ = log::set_logger(&Logger);
+        });
+    }
+}
