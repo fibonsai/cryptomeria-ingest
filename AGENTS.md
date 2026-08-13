@@ -62,6 +62,7 @@ Multi-exchange crypto market data ingestion library (OKX, Kraken, Bitstamp, Bitv
 - Supported exchanges: "okx", "kraken", "bitstamp", "bitvavo"
 - Data kinds: Lob (Limit Order Book), Trade (can be combined with |)
 - Configuration includes resilience settings, level filtering
+- `snapshot_delay` (Bitstamp): deltas to buffer before REST snapshot + merge (default 6); `0` disables buffering. See [ADR-026](docs/adr/Integration/ADR-026-20260813-bitstamp-delta-buffering-ccxt-pro.md).
 
 ## Skill Activation
 

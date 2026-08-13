@@ -83,6 +83,7 @@ fn test_data_source_config_with_fallback() {
         api_secret: None,
         checksum_log: false,
         crossguard_log: false,
+        snapshot_delay: 6,
     };
 
     assert!(config.validate().is_ok());

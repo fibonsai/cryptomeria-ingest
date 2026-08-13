@@ -22,6 +22,7 @@ fn bitstamp_adapter_subscribe_msgs_covers_orders_and_trades() {
         None,
         DataKind::LOB | DataKind::TRADE,
         false,
+        6,
     );
     let msgs = adapter.subscribe_msgs();
     assert_eq!(msgs.len(), 2);

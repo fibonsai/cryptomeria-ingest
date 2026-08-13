@@ -1,4 +1,6 @@
 use crate::config::ResilienceConfig;
+#[cfg(test)]
+use crate::items::LobItem;
 use crate::items::{IngestError, MarketDataItem};
 use futures_util::{SinkExt, Stream, StreamExt, stream};
 use log::{debug, error, info, warn};
@@ -262,10 +264,50 @@ pub trait ExchangeAdapter: Send + 'static {
         false
     }
 
+    /// Optional async hook called after successful connection + subscription,
+    /// before the read loop begins. Used by exchanges that need to fetch a
+    /// REST snapshot to seed the local order book on initial connect (e.g.
+    /// Bitstamp with delta buffering).
+    ///
+    /// Returns a vector of market data items (usually a single `LobItem`
+    /// snapshot) to emit immediately. Default returns `Ok(vec![])`.
+    #[allow(clippy::manual_async_fn)]
+    fn on_connect(
+        &mut self,
+    ) -> impl std::future::Future<Output = Result<Vec<MarketDataItem>, String>> + Send {
+        async { Ok(vec![]) }
+    }
+
     /// Optional async hook called after reconnection to fetch a snapshot (e.g. Bitstamp).
     /// Returns a vector of initial market data items (usually a single LobItem snapshot).
     /// Default implementation returns Ok(vec![]).
+    #[allow(clippy::manual_async_fn)]
     fn on_reconnect(
+        &mut self,
+    ) -> impl std::future::Future<Output = Result<Vec<MarketDataItem>, String>> + Send {
+        async { Ok(vec![]) }
+    }
+
+    /// Whether the adapter has buffered enough deltas and is requesting a
+    /// snapshot fetch + merge. Called by the wsloop after each
+    /// `handle_message` returns.
+    ///
+    /// When this returns `true`, the wsloop calls
+    /// [`fetch_snapshot_and_merge`](Self::fetch_snapshot_and_merge) in the next
+    /// iteration. Default returns `false` (no-ops; OKX/Kraken/Bitvavo
+    /// unaffected).
+    fn snapshot_needed(&self) -> bool {
+        false
+    }
+
+    /// Fetch a REST snapshot and merge previously-buffered deltas whose
+    /// nonce (`microtimestamp`) is >= the snapshot's nonce. Called by the
+    /// wsloop when [`snapshot_needed`](Self::snapshot_needed) returns `true`.
+    ///
+    /// Returns the market data items to emit (typically a single `LobItem`).
+    /// Default returns `Ok(vec![])`.
+    #[allow(clippy::manual_async_fn)]
+    fn fetch_snapshot_and_merge(
         &mut self,
     ) -> impl std::future::Future<Output = Result<Vec<MarketDataItem>, String>> + Send {
         async { Ok(vec![]) }
@@ -525,6 +567,25 @@ where
             }
             attempt = 0; // reset attempt counter on successful connect
 
+            // Optional on_connect hook: fetch a snapshot before the read loop
+            // (e.g. Bitstamp delta-buffering initial seed, or any exchange that
+            // needs to seed its book via REST before consuming deltas).
+            match adapter.on_connect().await {
+                Ok(items) => {
+                    for item in items {
+                        if tx.send(Ok(item)).await.is_err() {
+                            // Receiver dropped.
+                            break 'outer Err(IngestError::ChannelClosed);
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "[WS on_connect hook failed] exchange={exchange} instrument={instrument} channel={channel_names} error={e}"
+                    );
+                }
+            }
+
             // Silence timeout timer — reset on every received message so any
             // WebSocket traffic (data, heartbeat, ping/pong) counts as activity.
             // When `silence_timeout_secs` is `None`, the sentinel duration is
@@ -579,20 +640,45 @@ where
                                             // library handles websocket-level pings/pongs
                                             // automatically, so we just ignore here.
                                         }
-                                        // Pass to adapter for processing.
-                                         if let Some(item) = adapter.handle_message(&parsed) {
-                                             // Only actual market data (Lob/Trade) resets the
-                                             // silence timer; pongs, heartbeats, and other
-                                             // protocol noise do not count as channel activity.
-                                             silence_sleep.as_mut().reset(
-                                                 tokio::time::Instant::now() + silence_duration
-                                             );
-                                             // Send the item to the receiver.
-                                             if tx.send(Ok(item)).await.is_err() {
-                                                // Receiver dropped – shutdown.
-                                                break 'read;
-                                            }
-                                        }
+                                         // Pass to adapter for processing.
+                                          if let Some(item) = adapter.handle_message(&parsed) {
+                                              // Only actual market data (Lob/Trade) resets the
+                                              // silence timer; pongs, heartbeats, and other
+                                              // protocol noise do not count as channel activity.
+                                              silence_sleep.as_mut().reset(
+                                                  tokio::time::Instant::now() + silence_duration
+                                              );
+                                              // Send the item to the receiver.
+                                              if tx.send(Ok(item)).await.is_err() {
+                                                 // Receiver dropped – shutdown.
+                                                 break 'read;
+                                             }
+                                         }
+                                         // Poll for snapshot-fetch coordination: if the adapter
+                                         // has buffered enough deltas (or otherwise signals it
+                                         // is ready), call fetch_snapshot_and_merge and forward
+                                         // the resulting items. The adapter may have buffered
+                                         // deltas that were not themselves emitted (buffered
+                                         // for merge), so this is checked every iteration.
+                                         if adapter.snapshot_needed() {
+                                             match adapter.fetch_snapshot_and_merge().await {
+                                                 Ok(items) => {
+                                                     for item in items {
+                                                         silence_sleep.as_mut().reset(
+                                                             tokio::time::Instant::now() + silence_duration
+                                                         );
+                                                         if tx.send(Ok(item)).await.is_err() {
+                                                             break 'read;
+                                                         }
+                                                     }
+                                                 }
+                                                 Err(e) => {
+                                                     warn!(
+                                                         "[WS snapshot fetch failed] exchange={exchange} instrument={instrument} channel={channel_names} error={e}"
+                                                     );
+                                                 }
+                                             }
+                                         }
                                     }
                                     Err(e) => {
                                         if should_log_debug(debug_log, log::log_enabled!(log::Level::Debug)) {
@@ -1037,6 +1123,7 @@ mod tests {
             fallback: HashMap::new(),
             api_key: None,
             api_secret: None,
+            snapshot_delay: 6,
         };
 
         let adapter = MockAdapter {
@@ -1085,6 +1172,7 @@ mod tests {
             fallback: HashMap::new(),
             api_key: None,
             api_secret: None,
+            snapshot_delay: 6,
         };
 
         let adapter = MockAdapter {
@@ -1256,6 +1344,7 @@ mod tests {
                 max_attempts: Some(1),
                 ..Default::default()
             },
+            snapshot_delay: 6,
         };
         let adapter = SilenceTestAdapter { url };
         (config, adapter)
@@ -1323,5 +1412,240 @@ mod tests {
             got_trade,
             "should have received at least one Trade item within the silence window"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // on_connect hook: called after subscribe, before the read loop
+    // ------------------------------------------------------------------
+
+    struct OnConnectAdapter {
+        url: String,
+        on_connect_called: bool,
+    }
+
+    impl ExchangeAdapter for OnConnectAdapter {
+        type Message = String;
+
+        fn instrument(&self) -> &str {
+            "btcusd"
+        }
+        fn exchange(&self) -> &'static str {
+            "bitstamp"
+        }
+        fn url(&self) -> String {
+            self.url.clone()
+        }
+        fn subscribe_msgs(&self) -> Vec<(String, String)> {
+            vec![("test_channel".to_string(), "{}".to_string())]
+        }
+        fn parse_message(&self, _text: &str) -> Result<Self::Message, String> {
+            Ok("".to_string())
+        }
+        fn handle_message(&mut self, _msg: &Self::Message) -> Option<MarketDataItem> {
+            None
+        }
+        fn handle_heartbeat(&self, _msg: &Self::Message) -> bool {
+            false
+        }
+        fn keepalive_interval_ms(&self) -> u64 {
+            100_000
+        }
+
+        #[allow(clippy::manual_async_fn)]
+        fn on_connect(
+            &mut self,
+        ) -> impl std::future::Future<Output = Result<Vec<MarketDataItem>, String>> + Send {
+            self.on_connect_called = true;
+            async move {
+                Ok(vec![MarketDataItem::Lob(LobItem {
+                    ts: 999,
+                    exchange: "bitstamp".to_string(),
+                    bids: vec![],
+                    asks: vec![],
+                })])
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_on_connect_hook_emits_item_before_read_loop() {
+        let url = spawn_mock_ws_server("{}".to_string(), 50).await;
+
+        let config = crate::config::DataSourceConfig {
+            exchange: "bitstamp".to_string(),
+            region: "global".to_string(),
+            instrument: "BTCUSD".to_string(),
+            data_kind: crate::config::DataKind::LOB,
+            max_level: None,
+            max_level_pct: 0.0,
+            snapshot_delay: 6,
+            ..Default::default()
+        };
+
+        let adapter = OnConnectAdapter {
+            url,
+            on_connect_called: false,
+        };
+
+        let mut handle = run_exchange_stream(config, adapter).await.unwrap();
+
+        // The on_connect item should be the first thing emitted.
+        let item = tokio::time::timeout(Duration::from_secs(5), handle.stream.next())
+            .await
+            .expect("on_connect item should arrive quickly")
+            .expect("stream should emit on_connect item");
+
+        if let Ok(MarketDataItem::Lob(lob)) = &item {
+            assert_eq!(
+                lob.ts, 999,
+                "on_connect item must have the expected timestamp"
+            );
+        } else {
+            panic!("expected Lob item from on_connect, got: {:?}", item);
+        }
+
+        drop(handle);
+    }
+
+    #[tokio::test]
+    async fn test_default_on_connect_returns_empty() {
+        // MockAdapter does not override on_connect, so it uses the default
+        // impl which returns Ok(vec![]).
+        let mut adapter = MockAdapter {
+            url: "ws://127.0.0.1:1".to_string(),
+        };
+        let result = adapter.on_connect().await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // snapshot_needed / fetch_snapshot_and_merge polling
+    // ------------------------------------------------------------------
+
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct SnapshotPollingAdapter {
+        url: String,
+        msg_count: Arc<AtomicUsize>,
+    }
+
+    impl ExchangeAdapter for SnapshotPollingAdapter {
+        type Message = serde_json::Value;
+
+        fn instrument(&self) -> &str {
+            "btcusd"
+        }
+        fn exchange(&self) -> &'static str {
+            "bitstamp"
+        }
+        fn url(&self) -> String {
+            self.url.clone()
+        }
+        fn subscribe_msgs(&self) -> Vec<(String, String)> {
+            vec![("test_channel".to_string(), "{}".to_string())]
+        }
+        fn parse_message(&self, text: &str) -> Result<Self::Message, String> {
+            serde_json::from_str(text).map_err(|e| e.to_string())
+        }
+        fn handle_message(&mut self, msg: &Self::Message) -> Option<MarketDataItem> {
+            // Process a numeric "data" message, increment counter, return None
+            // (the delta is buffered internally; we only emit via fetch_snapshot_and_merge).
+            if msg.get("data").is_some() {
+                let n = self.msg_count.fetch_add(1, Ordering::SeqCst);
+                if n >= 3 {
+                    // We've processed enough deltas; but we can't return items here
+                    // (snapshot_needed is checked separately by the wsloop).
+                }
+            }
+            None
+        }
+        fn handle_heartbeat(&self, _msg: &Self::Message) -> bool {
+            false
+        }
+        fn keepalive_interval_ms(&self) -> u64 {
+            100_000
+        }
+        fn snapshot_needed(&self) -> bool {
+            // Signal snapshot needed after 3 deltas have been processed.
+            self.msg_count.load(Ordering::SeqCst) >= 3
+        }
+        #[allow(clippy::manual_async_fn)]
+        fn fetch_snapshot_and_merge(
+            &mut self,
+        ) -> impl std::future::Future<Output = Result<Vec<MarketDataItem>, String>> + Send {
+            async move {
+                Ok(vec![MarketDataItem::Lob(LobItem {
+                    ts: 888,
+                    exchange: "bitstamp".to_string(),
+                    bids: vec![],
+                    asks: vec![],
+                })])
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_polling_emits_after_snapshot_needed() {
+        // Mock server sends data messages every 50ms. After 3 are processed,
+        // snapshot_needed() returns true and the wsloop calls
+        // fetch_snapshot_and_merge(), which should emit a LobItem with ts=888.
+        let url = spawn_mock_ws_server(r#"{"data":1}"#.to_string(), 50).await;
+
+        let config = crate::config::DataSourceConfig {
+            exchange: "bitstamp".to_string(),
+            region: "global".to_string(),
+            instrument: "BTCUSD".to_string(),
+            data_kind: crate::config::DataKind::LOB,
+            max_level: None,
+            max_level_pct: 0.0,
+            snapshot_delay: 6,
+            ..Default::default()
+        };
+
+        let adapter = SnapshotPollingAdapter {
+            url,
+            msg_count: Arc::new(AtomicUsize::new(0)),
+        };
+
+        let mut handle = run_exchange_stream(config, adapter).await.unwrap();
+
+        // Collect items until we get the snapshot merge item (ts=888).
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut found_snapshot = false;
+        while let Ok(Some(item)) = tokio::time::timeout_at(deadline, handle.stream.next()).await {
+            if let Ok(MarketDataItem::Lob(lob)) = &item
+                && lob.ts == 888
+            {
+                found_snapshot = true;
+                break;
+            }
+        }
+
+        assert!(
+            found_snapshot,
+            "fetch_snapshot_and_merge item (ts=888) must be emitted after snapshot_needed returns true"
+        );
+
+        drop(handle);
+    }
+
+    #[tokio::test]
+    async fn test_default_snapshot_needed_is_false() {
+        let adapter = MockAdapter {
+            url: "ws://127.0.0.1:1".to_string(),
+        };
+        assert!(!adapter.snapshot_needed());
+    }
+
+    #[tokio::test]
+    async fn test_default_fetch_snapshot_and_merge_returns_empty() {
+        let mut adapter = MockAdapter {
+            url: "ws://127.0.0.1:1".to_string(),
+        };
+        let result = adapter.fetch_snapshot_and_merge().await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
     }
 }

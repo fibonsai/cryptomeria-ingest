@@ -187,6 +187,14 @@ impl Default for ExchangeFallbackMapping {
     }
 }
 
+/// Default number of diff-order-book deltas to buffer before fetching a REST
+/// snapshot. Mirrors CCXT Pro's `delta_cache_limit`.
+///
+/// See [ADR-026](docs/adr/Integration/ADR-026-20260813-bitstamp-delta-buffering-ccxt-pro.md).
+pub fn default_snapshot_delay() -> usize {
+    6
+}
+
 /// Complete configuration for a single `stream()` call.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DataSourceConfig {
@@ -219,14 +227,25 @@ pub struct DataSourceConfig {
     pub checksum_log: bool,
     /// When `true`, log `[kraken]` crossing-guard rejection warnings (an update
     /// whose price would cross the book: ask ≤ best bid or bid ≥ best ask) at
-    /// `warn!` even at the default log level (Kraken only). When `false` (the
-    /// default), such rejections are only logged when the runtime log level is
-    /// `DEBUG`. The crossing guard **always** drops the crossed level
-    /// regardless of this setting — only the diagnostic `warn!` is gated.
+    /// `warn!` even at the default log level (Kraken only). When
+    /// `false` (the default), such rejections are only logged when the runtime
+    /// log level is `DEBUG`. The crossing guard **always** drops the crossed
+    /// level regardless of this setting — only the diagnostic `warn!` is gated.
     /// Gating prevents the feed from generating noisy/spoofed log lines via the
     /// exchange-controlled update price; see [ADR-021](docs/adr/Operations/ADR-021-20260812-gate-checksum-mismatch-logging-prevent-log-spoofing.md).
     #[serde(default)]
     pub crossguard_log: bool,
+    /// Number of `diff_order_book` deltas to buffer before fetching the REST
+    /// snapshot (Bitstamp delta-buffering pattern, mirroring CCXT Pro's
+    /// `delta_cache_limit`). After this many deltas have been buffered, the
+    /// adapter signals `snapshot_needed()`, and the wsloop calls
+    /// `fetch_snapshot_and_merge()` to fetch the snapshot and replay buffered
+    /// deltas whose `microtimestamp` is >= the snapshot's.
+    ///
+    /// Default: `6` (same as CCXT Pro). Set to `0` to disable delta buffering
+    /// (fetch snapshot immediately on connect / reconnect, no buffering).
+    #[serde(default = "default_snapshot_delay")]
+    pub snapshot_delay: usize,
     /// Reconnection/backoff settings.
     #[serde(default)]
     pub resilience: ResilienceConfig,
@@ -333,6 +352,7 @@ impl Default for DataSourceConfig {
             fallback: HashMap::new(),
             api_key: None,
             api_secret: None,
+            snapshot_delay: default_snapshot_delay(),
         }
     }
 }
@@ -735,5 +755,50 @@ mod tests {
             cfg.crossguard_log,
             "crossguard_log: true must deserialize to true"
         );
+    }
+
+    #[test]
+    fn test_data_source_config_snapshot_delay_default_is_6() {
+        let cfg = DataSourceConfig::default();
+        assert_eq!(
+            cfg.snapshot_delay, 6,
+            "snapshot_delay must default to 6 (mirrors CCXT Pro delta_cache_limit)"
+        );
+    }
+
+    #[test]
+    fn test_data_source_config_snapshot_delay_deserialize_omitted_is_6() {
+        let json = r#"{
+            "exchange": "bitstamp",
+            "region": "global",
+            "instrument": "BTC/USD",
+            "data_kind": "Lob"
+        }"#;
+        let cfg: DataSourceConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            cfg.snapshot_delay, 6,
+            "omitted snapshot_delay must deserialize to 6"
+        );
+    }
+
+    #[test]
+    fn test_data_source_config_snapshot_delay_deserialize_explicit() {
+        let json = r#"{
+            "exchange": "bitstamp",
+            "region": "global",
+            "instrument": "BTC/USD",
+            "data_kind": "Lob",
+            "snapshot_delay": 10
+        }"#;
+        let cfg: DataSourceConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            cfg.snapshot_delay, 10,
+            "explicit snapshot_delay must be respected"
+        );
+    }
+
+    #[test]
+    fn test_default_snapshot_delay_helper() {
+        assert_eq!(default_snapshot_delay(), 6);
     }
 }
