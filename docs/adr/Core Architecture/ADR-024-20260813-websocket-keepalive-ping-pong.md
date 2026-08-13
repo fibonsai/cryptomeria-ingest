@@ -87,9 +87,31 @@ against a timeout.
 
 ## Decision
 
-Choose **Option 3**: a hybrid keepalive ping/pong mechanism where each adapter
-selects its strategy via the `ExchangeAdapter` trait, and the shared wsloop
-implements the unified liveness-tracking logic.
+Choose **Option 3** with an additional mechanism for server-initiated pings:
+
+### Hybrid keepalive with server-initiated ping handling
+
+The `ExchangeAdapter` trait provides:
+
+1. `ping_msg(&self) -> Option<String>` — when `Some(json)`, the wsloop sends
+   that as a `Message::Text` (application-level ping). When `None`, the wsloop
+   sends a raw `Message::Ping` frame (WebSocket-level ping).
+
+2. `is_pong(&self, msg: &Self::Message) -> bool` — when `ping_msg()` returns
+   `Some`, this detects application-level pong responses by inspecting parsed
+   messages. When `ping_msg()` returns `None`, the default returns `false` and
+   the wsloop detects `Message::Pong` frames at the transport level.
+
+3. `server_ping_response(&self, msg: &Self::Message) -> Option<String>` —
+   handles server-initiated application-level pings. Some exchanges (e.g., OKX
+   V5 feed) send `{"event":"ping","ts":"<ms>"}` and expect the client to
+   respond with `{"event":"pong","ts":"<ms>"}`. When this method returns
+   `Some(pong)`, the wsloop sends the pong response and updates `last_pong` to
+   `Instant::now()` (receiving a server ping is itself a liveness signal). When
+   it returns `None`, the message is not a server ping.
+
+In all three cases, the **same** wsloop code path tracks `last_pong` and compares
+it against a timeout.
 
 ### Mechanism
 
@@ -103,7 +125,13 @@ implements the unified liveness-tracking logic.
    `Instant::now()`. When `ping_msg()` returns `None`, raw `Message::Pong`
    frames are caught directly in the wsloop and also update `last_pong`.
 
-3. **Timeout:** If `last_pong.elapsed() > keepalive_interval_ms * 2` (the
+3. **Server-initiated ping handling:** The adapter's `server_ping_response()`
+   method is checked against every parsed text message. When it returns
+   `Some(pong_json)`, the wsloop sends `Message::Text(pong_json)` back and
+   updates `last_pong` — receiving a server ping is itself a liveness signal.
+   When it returns `None`, the message is not a server ping.
+
+4. **Timeout:** If `last_pong.elapsed() > keepalive_interval_ms * 2` (the
    `ping_timeout`), the wsloop raises `IngestError::RequestTimeout` and breaks
    to the reconnect path (exponential backoff + jitter + optional snapshot
    recovery — exactly the same strategy used for all other failure conditions).
@@ -111,34 +139,45 @@ implements the unified liveness-tracking logic.
    The `MAX_PING_PONG_MISSES` constant (currently `2.0`) controls how many
    missed ping cycles are tolerated before declaring the connection dead.
 
-4. **Silence timeout interaction:** The silence timeout (ADR-007) and the
+5. **Silence timeout interaction:** The silence timeout (ADR-007) and the
    keepalive timer run independently. Any received WebSocket frame resets the
-   silence timer; any received pong (app-level or ws-level) resets the keepalive
+   silence timer; any received pong or server ping resets the keepalive
    `last_pong`. This gives defense-in-depth: a truly dead connection is caught
    by either mechanism.
 
 ### Per-exchange configuration
 
-| Exchange   | `keepalive_interval_ms` | `ping_msg()`                          | `is_pong()` logic                |
-|------------|------------------------|---------------------------------------|----------------------------------|
-| OKX        | 18000                  | `{"event":"ping"}`                    | `event == "pong"`                |
-| Kraken     | 6000                   | `{"method":"ping"}`                    | `method == "pong"`               |
-| Bitstamp   | 5000                   | `None` (raw ws `Message::Ping`)        | default `false` (ws-level Pong)  |
-| Bitvavo    | 5000                   | `None` (raw ws `Message::Ping`)        | default `false` (ws-level Pong)  |
+| Exchange   | `keepalive_interval_ms` | `ping_msg()`                          | `is_pong()` logic                | `server_ping_response()` |
+|------------|------------------------|---------------------------------------|----------------------------------|--------------------------|
+| OKX        | 18000                  | `None` (ws-level)                    | `event == "pong"`                | Responds to `{"event":"ping","ts":"..."}` |
+| Kraken     | 6000                   | `{"method":"ping"}`                    | `method == "pong"`               | `None` (default)         |
+| Bitstamp   | 5000                   | `None` (raw ws `Message::Ping`)        | default `false` (ws-level Pong)  | `None` (default)         |
+| Bitvavo    | 5000                   | `None` (raw ws `Message::Ping`)        | default `false` (ws-level Pong)  | `None` (default)         |
+
+> **Note (OKX):** OKX's V5 WebSocket feed uses server-initiated ping/pong.
+> The client must **not** send `{"event":"ping"}` — OKX rejects it with error
+> 60012 ("Illegal request"). Instead, the wsloop sends WebSocket-level ping
+> frames, and the adapter handles OKX's server-initiated
+> `{"event":"ping","ts":"..."}` by responding with
+> `{"event":"pong","ts":"..."}` via `server_ping_response`. If OKX responds to
+> ws-level pings, those are also tracked via `Message::Pong` handling.
 
 ## Affected APIs
 
 - `src/wsloop.rs`:
-  - `ExchangeAdapter` trait gains `keepalive_interval_ms()`, `ping_msg()`, and
-    `is_pong()` methods (all with default implementations so existing test
-    mocks need no changes).
+  - `ExchangeAdapter` trait gains `keepalive_interval_ms()`, `ping_msg()`,
+    `is_pong()`, and `server_ping_response()` methods (all with default
+    implementations so existing test mocks need no changes).
   - `keepalive_timeout(keepalive_ms: u64) -> Duration` pure helper (multiplies
     by `MAX_PING_PONG_MISSES`).
   - `run_exchange_stream` read loop gains a `ping_sleep` timer branch and
     `last_pong` tracking; raises `IngestError::RequestTimeout` on timeout.
+    Text-message handling now also calls `server_ping_response()` and, when
+    it returns `Some`, sends the pong reply and updates `last_pong`.
 - `src/items.rs` — new `IngestError::RequestTimeout(String)` variant.
+- `src/okx/types.rs` — `OkxWsMessage` gains `ts: Option<String>` field.
 - `src/okx/ws.rs`, `src/kraken/ws.rs`, `src/bitstamp/ws.rs`, `src/bitvavo/ws.rs` —
-  adapter implementations of the three new trait methods.
+  adapter implementations of the trait methods.
 
 ## Consequences
 

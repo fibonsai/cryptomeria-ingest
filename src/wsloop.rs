@@ -299,6 +299,27 @@ pub trait ExchangeAdapter: Send + 'static {
         false
     }
 
+    /// Handle a server-initiated application-level ping message.
+    ///
+    /// Some exchanges (e.g., OKX V5 feed) send their own ping messages
+    /// (`{"event":"ping","ts":"..."}`) and expect the client to respond with
+    /// a pong (`{"event":"pong","ts":"..."}`). When `ping_msg()` returns
+    /// `None`, the wsloop falls back to WebSocket-level `Message::Ping` frames,
+    /// but some exchanges may not respond to those at the transport level.
+    /// Server-initiated application-level pings provide an alternative liveness
+    /// signal: if the server is sending pings, it is alive.
+    ///
+    /// This method is called for every received text message. If the message
+    /// is a server ping, return the pong response string; the wsloop will send
+    /// it back and update `last_pong` to `Instant::now()`. Return `None` if
+    /// the message is not a server ping.
+    ///
+    /// Default returns `None` (the adapter doesn't use server-initiated pings).
+    fn server_ping_response(&self, msg: &Self::Message) -> Option<String> {
+        let _ = msg;
+        None
+    }
+
     /// Optional async hook called after successful connection + subscription,
     /// before the read loop begins. Used by exchanges that need to fetch a
     /// REST snapshot to seed the local order book on initial connect (e.g.
@@ -729,6 +750,29 @@ where
                                             );
                                         }
                                     }
+                                    // Handle server-initiated application-level ping:
+                                    // exchange sends {"event":"ping","ts":"..."} (e.g. OKX
+                                    // V5 feed) and the client must respond with a pong.
+                                    // Receiving the server's ping is itself a liveness
+                                    // signal, so we update `last_pong` and send the pong
+                                    // response back on the write sink.
+                                    if let Some(pong_msg) = adapter.server_ping_response(&parsed)
+                                    {
+                                        last_pong = tokio::time::Instant::now();
+                                        match write.send(Message::Text(pong_msg)).await {
+                                            Ok(()) => {
+                                                if should_log_debug(debug_log, log::log_enabled!(log::Level::Debug)) {
+                                                    debug!(
+                                                        "[WS keepalive pong sent (server-ping response)] exchange={exchange} instrument={instrument} channel={channel_names}"
+                                                    );
+                                                }
+                                            }
+                                            Err(e) => {
+                                                error!("[WS pong send failed] exchange={exchange} instrument={instrument} channel={channel_names} error={e}");
+                                                break 'read;
+                                            }
+                                        }
+                                    }
                                     let _ = adapter.handle_heartbeat(&parsed);
                                     if let Some(item) = adapter.handle_message(&parsed) {
                                         if let Some(ref flag) = confirmed_flag
@@ -938,6 +982,14 @@ where
                             Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) => {
                                 if let Ok(parsed) = adapter.parse_message(&text) {
                                     if adapter.is_pong(&parsed) {
+                                        last_pong = tokio::time::Instant::now();
+                                    }
+                                    // Handle server-initiated application-level
+                                    // ping during drain phase as well.
+                                    if let Some(pong_msg) =
+                                        adapter.server_ping_response(&parsed)
+                                    {
+                                        let _ = write.send(Message::Text(pong_msg)).await;
                                         last_pong = tokio::time::Instant::now();
                                     }
                                     if let Some(item) = adapter.handle_message(&parsed)
@@ -1890,5 +1942,175 @@ mod tests {
         let result = adapter.fetch_snapshot_and_merge().await;
         assert!(result.is_ok());
         assert!(result.unwrap().is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // Default server_ping_response trait method
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_default_server_ping_response_is_none() {
+        // MockAdapter does not override server_ping_response, so it uses the
+        // default impl which returns None (no server-initiated pings expected).
+        let adapter = MockAdapter {
+            url: "ws://127.0.0.1:1".to_string(),
+        };
+        assert!(
+            adapter.server_ping_response(&"dummy".to_string()).is_none(),
+            "default server_ping_response must return None"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Server-initiated ping/pong liveness (OKX V5 feed model)
+    // ------------------------------------------------------------------
+
+    /// Mock adapter that simulates OKX's server-initiated ping/pong model:
+    /// `ping_msg()` returns `None` (ws-level ping fallback), and
+    /// `server_ping_response()` detects `{"event":"ping","ts":"..."}` and
+    /// returns `{"event":"pong","ts":"..."}`.
+    struct ServerPingAdapter {
+        url: String,
+    }
+
+    impl ExchangeAdapter for ServerPingAdapter {
+        type Message = serde_json::Value;
+
+        fn instrument(&self) -> &str {
+            "btcusd"
+        }
+        fn exchange(&self) -> &'static str {
+            "bitstamp"
+        }
+        fn url(&self) -> String {
+            self.url.clone()
+        }
+        fn subscribe_msgs(&self) -> Vec<(String, String)> {
+            vec![("test_channel".to_string(), "{}".to_string())]
+        }
+        fn parse_message(&self, text: &str) -> Result<Self::Message, String> {
+            serde_json::from_str(text).map_err(|e| e.to_string())
+        }
+        fn handle_message(&mut self, _msg: &Self::Message) -> Option<MarketDataItem> {
+            None
+        }
+        fn handle_heartbeat(&self, _msg: &Self::Message) -> bool {
+            false
+        }
+        fn keepalive_interval_ms(&self) -> u64 {
+            1000
+        }
+        fn ping_msg(&self) -> Option<String> {
+            None
+        }
+
+        fn server_ping_response(&self, msg: &Self::Message) -> Option<String> {
+            if msg.get("event").and_then(|v| v.as_str()) == Some("ping") {
+                let ts = msg.get("ts").and_then(|v| v.as_str());
+                if let Some(ts) = ts {
+                    Some(serde_json::json!({"event": "pong", "ts": ts}).to_string())
+                } else {
+                    Some(serde_json::json!({"event": "pong"}).to_string())
+                }
+            } else {
+                None
+            }
+        }
+
+        fn fresh_adapter(&self) -> Self {
+            ServerPingAdapter {
+                url: self.url.clone(),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_server_ping_keeps_connection_alive() {
+        // Mock server sends {"event":"ping","ts":"123"} every 200ms.
+        // The adapter should respond with {"event":"pong","ts":"123"} via
+        // server_ping_response, and the wsloop should update last_pong so
+        // no keepalive timeout fires.
+        use futures_util::StreamExt as _;
+        use std::sync::Arc;
+        use std::sync::Mutex;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("ws://127.0.0.1:{}", addr.port());
+
+        let received: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let received_clone = received.clone();
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let ws_stream = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let (mut write, mut read) = ws_stream.split();
+
+            // Capture what the client sends (subscribe + pong responses).
+            let rcv = received_clone.clone();
+            tokio::spawn(async move {
+                while let Some(Ok(msg)) = read.next().await {
+                    if let tokio_tungstenite::tungstenite::Message::Text(text) = msg {
+                        rcv.lock().unwrap().push(text);
+                    }
+                }
+            });
+
+            // Send server-initiated pings every 200ms.
+            let ping = r#"{"event":"ping","ts":"123"}"#.to_string();
+            loop {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                if write.send(Message::Text(ping.clone())).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let config = crate::config::DataSourceConfig {
+            exchange: "bitstamp".to_string(),
+            region: "global".to_string(),
+            instrument: "btcusd".to_string(),
+            data_kind: crate::config::DataKind::LOB,
+            max_level: None,
+            max_level_pct: 0.0,
+            snapshot_delay: 6,
+            ..Default::default()
+        };
+
+        let adapter = ServerPingAdapter { url };
+        let mut handle = run_exchange_stream(config, adapter).await.unwrap();
+
+        // Run for 5 seconds. If server-ping handling is broken, the keepalive
+        // timeout (2× keepalive = 2s) would fire and surface an error.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut got_error = false;
+        loop {
+            match tokio::time::timeout_at(deadline, handle.stream.next()).await {
+                Ok(Some(Err(_))) => {
+                    got_error = true;
+                    break;
+                }
+                Ok(Some(Ok(_))) => {}
+                Ok(None) => break,
+                Err(_) => break, // deadline — no more data (expected: no trades)
+            }
+        }
+
+        assert!(
+            !got_error,
+            "keepalive timeout should not fire when server sends pings every 200ms"
+        );
+
+        // Verify the client actually sent pong responses.
+        let sent = received.lock().unwrap();
+        assert!(
+            sent.iter().any(|m| m.contains(r#""event":"pong""#)),
+            "client must send pong responses to server pings: got {:?}",
+            *sent
+        );
+
+        drop(handle);
     }
 }
