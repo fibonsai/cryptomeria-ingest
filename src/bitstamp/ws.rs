@@ -34,6 +34,7 @@ pub struct BitstampAdapter {
     pub max_level_pct: f64,
     pub max_level: Option<usize>,
     pub data_kind: DataKind,
+    pub checksum_log: bool,
     book: OrderBook,
     prev_lob: Option<LobItem>,
     trade_seq: u64,
@@ -49,6 +50,7 @@ impl BitstampAdapter {
         max_level_pct: f64,
         max_level: Option<usize>,
         data_kind: DataKind,
+        checksum_log: bool,
     ) -> Self {
         Self {
             instrument,
@@ -58,6 +60,7 @@ impl BitstampAdapter {
             max_level_pct,
             max_level,
             data_kind,
+            checksum_log,
             book: OrderBook::new(),
             prev_lob: None,
             trade_seq: 0,
@@ -152,6 +155,13 @@ impl BitstampAdapter {
                 .unwrap(),
         )])
     }
+
+    /// Drop all locally-tracked state: the LOB book and the previous-emit
+    /// cache. Used on reconnect and when the book is flagged for resync.
+    fn reset_local(&mut self) {
+        self.book.reset();
+        self.prev_lob = None;
+    }
 }
 
 impl ExchangeAdapter for BitstampAdapter {
@@ -202,6 +212,19 @@ impl ExchangeAdapter for BitstampAdapter {
                 });
 
                 self.book.process_msg(msg);
+
+                // Crossing-guard clear: the book can no longer be trusted. Wipe
+                // it and await the next full snapshot. (Currently a no-op while
+                // BITSTAMP_LOB_DISABLED, but wired for safe re-enablement.)
+                if self.book.needs_resync() {
+                    warn!(
+                        "[bitstamp] book integrity check failed for {} ({}); dropping book and awaiting resync",
+                        self.instrument, self.exchange
+                    );
+                    self.reset_local();
+                    return None;
+                }
+
                 self.emit_lob(ts)
             }
             MessageType::Trade => {
@@ -260,6 +283,10 @@ impl ExchangeAdapter for BitstampAdapter {
     // LOB channel (a Trade-only connection has no snapshot to recover).
     async fn on_reconnect(&mut self) -> Result<Vec<MarketDataItem>, String> {
         if self.data_kind.contains(DataKind::LOB) {
+            // Clear stale book state before the REST snapshot re-seeds so the
+            // local book never continues from a half-corrupt book across a
+            // connection loss.
+            self.reset_local();
             self.fetch_snapshot().await
         } else {
             Ok(vec![])
@@ -280,6 +307,7 @@ mod tests {
             0.0,
             None,
             DataKind::LOB | DataKind::TRADE,
+            false,
         )
     }
 
@@ -292,6 +320,7 @@ mod tests {
             0.0,
             None,
             data_kind,
+            false,
         )
     }
 
@@ -304,6 +333,7 @@ mod tests {
             max_level_pct,
             max_level,
             DataKind::LOB,
+            false,
         )
     }
 

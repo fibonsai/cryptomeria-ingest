@@ -30,6 +30,7 @@ pub struct OkxAdapter {
     pub max_level_pct: f64,
     pub max_level: Option<usize>,
     pub data_kind: DataKind,
+    pub checksum_log: bool,
     book: OrderBook,
     prev_lob: Option<LobItem>,
 }
@@ -41,7 +42,10 @@ impl OkxAdapter {
         max_level_pct: f64,
         max_level: Option<usize>,
         data_kind: DataKind,
+        checksum_log: bool,
     ) -> Self {
+        let mut book = OrderBook::new();
+        book.set_checksum_log(checksum_log);
         Self {
             instrument,
             region,
@@ -49,7 +53,8 @@ impl OkxAdapter {
             max_level_pct,
             max_level,
             data_kind,
-            book: OrderBook::new(),
+            checksum_log,
+            book,
             prev_lob: None,
         }
     }
@@ -76,6 +81,13 @@ impl OkxAdapter {
         self.prev_lob = Some(lob.clone());
 
         Some(MarketDataItem::Lob(lob))
+    }
+
+    /// Drop all locally-tracked state: the LOB book and the previous-emit
+    /// cache. Used on reconnect and when the book is flagged for resync.
+    fn reset_local(&mut self) {
+        self.book.reset();
+        self.prev_lob = None;
     }
 }
 
@@ -120,6 +132,18 @@ impl ExchangeAdapter for OkxAdapter {
                         .as_millis() as u64
                 });
                 self.book.process_msg(msg);
+
+                // Crossing-guard clear: the book can no longer be trusted. Wipe
+                // it and await the next full snapshot (delivered on reconnect).
+                if self.book.needs_resync() {
+                    warn!(
+                        "[okx] book integrity check failed for {} ({}); dropping book and awaiting resync",
+                        self.instrument, self.exchange
+                    );
+                    self.reset_local();
+                    return None;
+                }
+
                 self.emit_lob(ts)
             }
             MessageType::Trade => {
@@ -168,6 +192,16 @@ impl ExchangeAdapter for OkxAdapter {
                 }
                 let ts = msg.timestamp_ms().unwrap_or(0);
                 self.book.process_msg(msg);
+
+                if self.book.needs_resync() {
+                    warn!(
+                        "[okx] book integrity check failed for {} ({}); dropping book and awaiting resync",
+                        self.instrument, self.exchange
+                    );
+                    self.reset_local();
+                    return None;
+                }
+
                 self.emit_lob(ts)
             }
         }
@@ -179,6 +213,19 @@ impl ExchangeAdapter for OkxAdapter {
 
     fn url(&self) -> String {
         crate::urls::websocket_url(&self.region, "okx").to_string()
+    }
+
+    // Called after a reconnect: OKX books channel sends a fresh snapshot on
+    // (re-)subscribe, so wipe the in-memory book (and prev_lob state) so the
+    // first post-resubscribe snapshot re-seeds cleanly — never continuing from
+    // a stale, half-corrupt book across connection loss.
+    async fn on_reconnect(&mut self) -> Result<Vec<MarketDataItem>, String> {
+        warn!(
+            "[okx] reconnect: resetting local book for {} ({})",
+            self.instrument, self.exchange
+        );
+        self.reset_local();
+        Ok(vec![])
     }
 }
 
@@ -193,11 +240,19 @@ mod tests {
             0.0,
             None,
             DataKind::LOB | DataKind::TRADE,
+            false,
         )
     }
 
     fn adapter_with_kind(data_kind: DataKind) -> OkxAdapter {
-        OkxAdapter::new("BTC-USDT".into(), "global".into(), 0.0, None, data_kind)
+        OkxAdapter::new(
+            "BTC-USDT".into(),
+            "global".into(),
+            0.0,
+            None,
+            data_kind,
+            false,
+        )
     }
 
     fn adapter_with_filter(max_level: Option<usize>, max_level_pct: f64) -> OkxAdapter {
@@ -207,6 +262,7 @@ mod tests {
             max_level_pct,
             max_level,
             DataKind::LOB,
+            false,
         )
     }
 
@@ -425,5 +481,102 @@ mod tests {
         // Memory reflects the update: 4 bids (100.0 removed), 6 asks (106.0 added).
         assert_eq!(a.book.num_bids(), 4, "96.0 bid removed → 4 bids");
         assert_eq!(a.book.num_asks(), 6, "106.0 ask added → 6 asks");
+    }
+
+    // ------------------------------------------------------------------
+    // Resync & reconnect: reset behavior
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_on_reconnect_resets_book() {
+        let mut a = adapter();
+        let snap: OkxWsMessage = serde_json::from_str(
+            r#"{
+                "arg": {"channel": "books", "instId": "BTC-USDT"},
+                "action": "snapshot",
+                "data": [{
+                    "asks": [["101.0","1.0"],["102.0","2.0"]],
+                    "bids": [["100.0","1.0"],["99.0","2.0"]],
+                    "ts": "1000",
+                    "checksum": 0
+                }]
+            }"#,
+        )
+        .unwrap();
+        a.handle_message(&snap);
+        assert_eq!(a.book.num_bids(), 2, "snapshot must populate the book");
+        assert!(a.prev_lob.is_some(), "an emit must have populated prev_lob");
+
+        let items = a.on_reconnect().await.expect("on_reconnect fails");
+        assert!(items.is_empty(), "okx has no REST snapshot to fetch");
+        assert_eq!(a.book.num_bids(), 0, "book must be reset on reconnect");
+        assert_eq!(a.book.num_asks(), 0, "book must be reset on reconnect");
+        assert!(
+            a.prev_lob.is_none(),
+            "prev_lob must be cleared on reconnect"
+        );
+    }
+
+    #[test]
+    fn test_handle_message_resets_on_needs_resync() {
+        // A crossing update pushes a bid >= best ask; repair_crossing clears the
+        // book and sets needs_resync. handle_message must detect this, reset, and
+        // return None (do not emit a crossed/empty lob).
+        let mut a = adapter_with_kind(DataKind::LOB);
+        // Snapshot: bids 100, asks 101.
+        let snap: OkxWsMessage = serde_json::from_str(
+            r#"{
+                "arg": {"channel": "books", "instId": "BTC-USDT"},
+                "action": "snapshot",
+                "data": [{"bids":[["100.0","1.0"]],"asks":[["101.0","1.0"]],"ts":"0","checksum":0}]
+            }"#,
+        )
+        .unwrap();
+        a.handle_message(&snap);
+        assert_eq!(a.book.num_bids(), 1);
+
+        // Bad snapshot: asks below bids (bid 100 >= ask 99). bids are applied
+        // first (no crossing yet since asks=101), then asks=99 are applied —
+        // repair_crossing detects the cross on the ask side (after the flag
+        // reset) and sets needs_resync.
+        let bad: OkxWsMessage = serde_json::from_str(
+            r#"{
+                "arg": {"channel": "books", "instId": "BTC-USDT"},
+                "action": "snapshot",
+                "data": [{"bids":[["100.0","1.0"]],"asks":[["99.0","1.0"]],"ts":"1","checksum":0}]
+            }"#,
+        )
+        .unwrap();
+        let item = a.handle_message(&bad);
+        assert!(item.is_none(), "crossed book must not emit a lob");
+        assert_eq!(a.book.num_bids(), 0, "book must be reset after resync");
+        assert_eq!(a.book.num_asks(), 0);
+        assert!(!a.book.needs_resync(), "reset must clear the resync flag");
+    }
+
+    #[test]
+    fn test_adapter_threads_checksum_log() {
+        let on = OkxAdapter::new(
+            "BTC-USDT".into(),
+            "global".into(),
+            0.0,
+            None,
+            DataKind::LOB,
+            true,
+        );
+        assert!(
+            on.checksum_log,
+            "checksum_log=true must be retained on the adapter"
+        );
+
+        let off = OkxAdapter::new(
+            "BTC-USDT".into(),
+            "global".into(),
+            0.0,
+            None,
+            DataKind::LOB,
+            false,
+        );
+        assert!(!off.checksum_log, "checksum_log=false by default");
     }
 }

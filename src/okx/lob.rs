@@ -2,6 +2,7 @@ use crate::items::{LobItem, LobLevel};
 use crate::okx::types::OkxWsMessage;
 use crate::okx::types::{PriceLevel, extract_levels};
 use crate::traits::{LevelsWithinPct, OrderBook as OrderBookTrait};
+use log::warn;
 use ordered_float::OrderedFloat;
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
@@ -30,6 +31,30 @@ pub struct OrderBook {
     pub bids: BTreeMap<Reverse<OrderedFloat<f64>>, f64>,
     /// asks: OrderedFloat<price> → amount  (ascending iteration)
     pub asks: BTreeMap<OrderedFloat<f64>, f64>,
+    /// Set to `true` when `repair_crossing` clears a crossed book. The owning
+    /// adapter should drop all levels (`reset`) and await a fresh snapshot.
+    needs_resync: bool,
+    /// Observability flag set when the last `verify_checksum` detected a mismatch.
+    /// Does not by itself drop the book (warn-only, per ADR-020).
+    checksum_failed: bool,
+    /// When `true`, a CRC32 checksum mismatch is logged at `warn!` even at the
+    /// default log level. The mismatch is *also* logged at `DEBUG`. Defaults to
+    /// `false` to prevent an exchange feed from spoofing log lines via the
+    /// exchange-supplied checksum value.
+    checksum_log: bool,
+}
+
+/// Serialize a price/size for the OKX checksum string, mirroring ccxt's
+/// `format_number`: the integer and decimal parts are joined (decimal point
+/// removed) and leading zeros are stripped — e.g. `50001.5` -> `"500015"`,
+/// `0.5` -> `"5"`.
+fn format_number(value: f64) -> String {
+    let s = format!("{value}");
+    let mut parts = s.splitn(2, '.');
+    let integer = parts.next().unwrap_or_default();
+    let decimals = parts.next().unwrap_or_default();
+    let joined = format!("{integer}{decimals}");
+    joined.trim_start_matches('0').to_string()
 }
 
 impl OrderBook {
@@ -37,6 +62,9 @@ impl OrderBook {
         Self {
             bids: BTreeMap::new(),
             asks: BTreeMap::new(),
+            needs_resync: false,
+            checksum_failed: false,
+            checksum_log: false,
         }
     }
 
@@ -113,6 +141,14 @@ impl OrderBook {
     /// Clear all levels on the given side and insert fresh ones from `data`.
     /// Only levels with amount > 0.0 are inserted.
     pub fn apply_snapshot(&mut self, data: &[PriceLevel], side: Side) {
+        // A new (full) snapshot re-establishes the baseline: any previous
+        // resync flag and checksum-failure flag are discarded. The ask side
+        // lands after bids in `process_msg`, so resetting here mirrors Kraken
+        // (`src/kraken/lob.rs:141-149`).
+        if side == Side::Ask {
+            self.needs_resync = false;
+            self.checksum_failed = false;
+        }
         match side {
             Side::Bid => {
                 self.bids.clear();
@@ -135,6 +171,11 @@ impl OrderBook {
                 }
             }
         }
+        // A full snapshot may legitimately be partial (only one side present),
+        // leaving the other half stale from a previous sync. Guard against a
+        // crossed book as a safety net; if crossed, the book will be cleared
+        // and re-seeded from the next full snapshot.
+        self.repair_crossing();
     }
 
     /// Apply incremental changes for the given side.
@@ -149,6 +190,21 @@ impl OrderBook {
                         if amount == 0.0 {
                             self.bids.remove(&Reverse(OrderedFloat(price)));
                         } else {
+                            // Reject any bid that would cross above the best ask.
+                            if let Some(best_ask) = self.best_ask()
+                                && price >= best_ask
+                            {
+                                if Self::should_log_crossing(
+                                    self.checksum_log,
+                                    log::log_enabled!(log::Level::Debug),
+                                ) {
+                                    warn!(
+                                        "[okx] rejecting bid update at {:.2} >= best ask {:.2} (cross guard)",
+                                        price, best_ask
+                                    );
+                                }
+                                continue;
+                            }
                             self.bids.insert(Reverse(OrderedFloat(price)), amount);
                         }
                     }
@@ -156,12 +212,153 @@ impl OrderBook {
                         if amount == 0.0 {
                             self.asks.remove(&OrderedFloat(price));
                         } else {
+                            // Reject any ask that would cross below the best bid.
+                            if let Some(best_bid) = self.best_bid()
+                                && price <= best_bid
+                            {
+                                if Self::should_log_crossing(
+                                    self.checksum_log,
+                                    log::log_enabled!(log::Level::Debug),
+                                ) {
+                                    warn!(
+                                        "[okx] rejecting ask update at {:.2} <= best bid {:.2} (cross guard)",
+                                        price, best_bid
+                                    );
+                                }
+                                continue;
+                            }
                             self.asks.insert(OrderedFloat(price), amount);
                         }
                     }
                 }
             }
         }
+        self.repair_crossing();
+    }
+
+    /// Repair a crossed book (best bid >= best ask).
+    ///
+    /// With the per-update crossing guard above a cross should not arise in
+    /// `apply_update`; this exists as a safety net for partial snapshots and
+    /// stale reconnect state. Both sides are cleared and the book awaits the
+    /// next full snapshot.
+    fn repair_crossing(&mut self) {
+        if let (Some(b), Some(a)) = (self.best_bid(), self.best_ask())
+            && b >= a
+        {
+            if Self::should_log_crossing(self.checksum_log, log::log_enabled!(log::Level::Debug)) {
+                warn!(
+                    "[okx] detected crossed book (bid {:.2} >= ask {:.2}); clearing stale book",
+                    b, a
+                );
+            }
+            self.bids.clear();
+            self.asks.clear();
+            self.needs_resync = true;
+        }
+    }
+
+    /// Decide whether a CRC32 checksum mismatch should be logged.
+    ///
+    /// A mismatch is surfaced only when the operator explicitly opted in via
+    /// `checksum_log` **or** the runtime log level is `DEBUG`. Keeping this a pure
+    /// function of its two inputs makes the gating policy unit-testable.
+    pub fn should_log_mismatch(checksum_log: bool, debug_enabled: bool) -> bool {
+        checksum_log || debug_enabled
+    }
+
+    /// Decide whether a crossing-guard rejection should be logged.
+    ///
+    /// A rejection is surfaced at `warn!` only when the operator opted in via
+    /// `checksum_log` **or** the runtime log level is `DEBUG`. The underlying
+    /// reject/drop behavior in `apply_update` is unconditional.
+    pub fn should_log_crossing(checksum_log: bool, debug_enabled: bool) -> bool {
+        checksum_log || debug_enabled
+    }
+
+    /// Enable or disable `warn!`-level logging of CRC32 checksum mismatches.
+    ///
+    /// Even when logging is disabled, mismatches are still recorded in
+    /// [`checksum_failed`](Self::checksum_failed) and surfaced at `DEBUG`.
+    pub fn set_checksum_log(&mut self, enabled: bool) {
+        self.checksum_log = enabled;
+    }
+
+    /// Whether CRC32 mismatch warnings are opted into for this book
+    /// (regardless of the runtime log level). Defaults to `false`.
+    pub fn checksum_log(&self) -> bool {
+        self.checksum_log
+    }
+
+    /// Compare the local CRC32 of the top-`depth` levels against the
+    /// exchange-supplied `checksum`. Returns `true` on match (or when the
+    /// exchange sent no checksum). On mismatch a warning is logged and
+    /// [`checksum_failed`](Self::checksum_failed) is flagged.
+    ///
+    /// A checksum mismatch is **not**, by itself, treated as ground truth for
+    /// dropping the book: the exact CRC32 string cannot be losslessly
+    /// reconstructed from parsed `f64` prices/sizes (leading-zero/decimal
+    /// padding ambiguity — same reason ccxt disables it). The authoritative
+    /// corruption signal is the crossing guard clearing the book.
+    pub fn verify_checksum(&mut self, checksum: i64) -> bool {
+        if checksum <= 0 {
+            return true;
+        }
+        let computed = self.compute_checksum(10);
+        if (computed as i64) != checksum {
+            if Self::should_log_mismatch(self.checksum_log, log::log_enabled!(log::Level::Debug)) {
+                warn!(
+                    "[okx] checksum mismatch: local {} != exchange {} (crossing guard is the authoritative corruption signal)",
+                    computed, checksum
+                );
+            }
+            self.checksum_failed = true;
+            return false;
+        }
+        true
+    }
+
+    /// Best-effort CRC32 of the top-`depth` levels, mirroring OKX's
+    /// documented book-checksum algorithm (and ccxt's `format_number`):
+    /// the top `depth` asks (price ascending) and top `depth` bids (price
+    /// descending) are each serialized as `format_number(price) ++
+    /// format_number(size)`, concatenated asks-then-bids without separators,
+    /// and CRC32'd.
+    pub fn compute_checksum(&self, depth: usize) -> u32 {
+        let mut s = String::new();
+        // Asks first (best/lowest first), then bids (best/highest first).
+        for (k, v) in self.asks.iter().take(depth) {
+            s.push_str(&format_number(k.0));
+            s.push_str(&format_number(*v));
+        }
+        for (k, v) in self.bids.iter().take(depth) {
+            s.push_str(&format_number(k.0.0));
+            s.push_str(&format_number(*v));
+        }
+        crc32fast::hash(s.as_bytes())
+    }
+
+    /// Returns `true` when the book must be resynced (`repair_crossing` cleared
+    /// a crossed book). The adapter should drop all levels and await the next
+    /// snapshot.
+    pub fn needs_resync(&self) -> bool {
+        self.needs_resync
+    }
+
+    /// Returns `true` when the last `verify_checksum` call detected a mismatch.
+    /// Observability signal only (warn-only, does not drop the book).
+    pub fn checksum_failed(&self) -> bool {
+        self.checksum_failed
+    }
+
+    /// Discard all book levels and sync state. Called by the adapter after
+    /// `on_reconnect` and when `needs_resync` is flagged, so the book is
+    /// re-seeded by the next full snapshot.
+    pub fn reset(&mut self) {
+        self.bids.clear();
+        self.asks.clear();
+        self.needs_resync = false;
+        self.checksum_failed = false;
     }
 
     /// Process an OKX WebSocket message: extract bids/asks from `data[0]`
@@ -186,6 +383,15 @@ impl OrderBook {
                     _ => {}
                 }
             }
+        }
+
+        // Integrity check: verify CRC32 checksum against the exchange-supplied
+        // value. Warn-only (gated by should_log_mismatch); the crossing guard +
+        // reconnect reset are the authoritative corruption signals (ADR-020/021).
+        if let Some(checksum) = data.get("checksum").and_then(|c| c.as_i64())
+            && checksum != 0
+        {
+            self.verify_checksum(checksum);
         }
     }
 
@@ -994,5 +1200,194 @@ mod tests {
         assert_eq!(filtered.bids.len(), 2, "filtered lob has 2 bids");
         assert_eq!(full.asks.len(), 5, "memory has 5 asks");
         assert_eq!(filtered.asks.len(), 2, "filtered lob has 2 asks");
+    }
+
+    // ------------------------------------------------------------------
+    // Crossing guard: the in-memory book must never allow the best bid
+    // to rise above the best ask (or the best ask to fall below the
+    // best bid). Such a state is a corrupt book caused by a stale or
+    // out-of-order update; once crossed the book stays crossed for all
+    // subsequent updates unless explicitly repaired.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_apply_update_cannot_cross_book_as_bid() {
+        let mut book = OrderBook::new();
+        book.apply_snapshot(&[price_level("100.0", "1.0")], Side::Bid);
+        book.apply_snapshot(&[price_level("101.0", "1.0")], Side::Ask);
+        assert!(book.best_bid() < Some(101.0));
+
+        // An update that would push a bid above the best ask must be guarded.
+        book.apply_update(&[price_level("102.0", "5.0")], Side::Bid);
+        assert!(
+            book.best_bid().map(|b| b <= 101.0).unwrap_or(true),
+            "best bid must not exceed best ask after update, but best_bid={:?} best_ask={:?}",
+            book.best_bid(),
+            book.best_ask()
+        );
+    }
+
+    #[test]
+    fn test_apply_update_cannot_cross_book_as_ask() {
+        let mut book = OrderBook::new();
+        book.apply_snapshot(&[price_level("100.0", "1.0")], Side::Bid);
+        book.apply_snapshot(&[price_level("101.0", "1.0")], Side::Ask);
+
+        // An update that would push an ask below the best bid must be guarded.
+        book.apply_update(&[price_level("99.0", "5.0")], Side::Ask);
+        assert!(
+            book.best_ask().map(|a| a >= 100.0).unwrap_or(true),
+            "best ask must not fall below best bid after update, but best_bid={:?} best_ask={:?}",
+            book.best_bid(),
+            book.best_ask()
+        );
+    }
+
+    #[test]
+    fn test_repair_crossing_clears_okx_book() {
+        // Construct the crossed state directly: apply_snapshot would itself call
+        // repair_crossing and clear it before we can observe the pre-repair state.
+        let mut book = OrderBook::new();
+        book.bids.insert(Reverse(OrderedFloat(102.0)), 1.0);
+        book.asks.insert(OrderedFloat(100.0), 1.0);
+        // book is now crossed: best bid 102 >= best ask 100
+        assert_eq!(book.best_bid(), Some(102.0));
+        assert_eq!(book.best_ask(), Some(100.0));
+        book.repair_crossing();
+        assert!(
+            book.bids.is_empty() && book.asks.is_empty(),
+            "repair_crossing must clear a crossed book"
+        );
+        assert!(book.needs_resync(), "repair_crossing must set needs_resync");
+    }
+
+    // ------------------------------------------------------------------
+    // CRC32 checksum verification (warn-only, gated).
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_checksum_mismatch_flags_without_resetting_book() {
+        let mut book = OrderBook::new();
+        book.apply_snapshot(&[price_level("100.0", "1.0")], Side::Bid);
+        book.apply_snapshot(&[price_level("101.0", "1.0")], Side::Ask);
+        // Deliberately wrong checksum: must flag checksum_failed but NOT clear
+        // the book (warn-only; ADR-020).
+        let computed = book.compute_checksum(10);
+        let wrong = (computed as i64).wrapping_add(1);
+        assert!(!book.verify_checksum(wrong), "mismatch must return false");
+        assert!(book.checksum_failed(), "mismatch must flag checksum_failed");
+        assert!(!book.needs_resync(), "mismatch must NOT flag needs_resync");
+        assert_eq!(book.num_bids(), 1, "book levels must be retained");
+        assert_eq!(book.num_asks(), 1);
+    }
+
+    #[test]
+    fn test_checksum_match_does_not_trigger_resync() {
+        let mut book = OrderBook::new();
+        book.apply_snapshot(&[price_level("100.0", "1.0")], Side::Bid);
+        book.apply_snapshot(&[price_level("101.0", "1.0")], Side::Ask);
+        let computed = book.compute_checksum(10);
+        assert!(
+            book.verify_checksum(computed as i64),
+            "match must return true"
+        );
+        assert!(!book.needs_resync());
+        assert!(!book.checksum_failed());
+    }
+
+    #[test]
+    fn test_checksum_zero_skips_validation() {
+        let mut book = OrderBook::new();
+        book.apply_snapshot(&[price_level("100.0", "1.0")], Side::Bid);
+        book.apply_snapshot(&[price_level("101.0", "1.0")], Side::Ask);
+        assert!(book.verify_checksum(0));
+        assert!(!book.needs_resync());
+    }
+
+    #[test]
+    fn test_reset_clears_okx_book_and_flags() {
+        let mut book = OrderBook::new();
+        book.apply_snapshot(&[price_level("100.0", "1.0")], Side::Bid);
+        book.apply_snapshot(&[price_level("101.0", "1.0")], Side::Ask);
+        // Corrupt via checksum mismatch, then reset.
+        let computed = book.compute_checksum(10);
+        book.verify_checksum((computed as i64).wrapping_add(1));
+        assert!(book.checksum_failed());
+        assert_eq!(book.num_bids(), 1);
+        book.reset();
+        assert_eq!(book.num_bids(), 0);
+        assert_eq!(book.num_asks(), 0);
+        assert!(book.best_bid().is_none());
+        assert!(!book.needs_resync());
+        assert!(!book.checksum_failed(), "reset must clear checksum_failed");
+    }
+
+    #[test]
+    fn test_should_log_mismatch_gating() {
+        assert!(
+            !OrderBook::should_log_mismatch(false, false),
+            "default (no opt-in, no debug) must stay silent"
+        );
+        assert!(
+            OrderBook::should_log_mismatch(true, false),
+            "checksum_log opt-in must surface the mismatch"
+        );
+        assert!(
+            OrderBook::should_log_mismatch(false, true),
+            "DEBUG log level must surface the mismatch"
+        );
+        assert!(
+            OrderBook::should_log_mismatch(true, true),
+            "checksum_log + DEBUG must surface the mismatch"
+        );
+    }
+
+    #[test]
+    fn test_checksum_mismatch_flags_regardless_of_logging() {
+        // The checksum_failed flag must be set on a mismatch even when logging
+        // is suppressed (no opt-in, no DEBUG).
+        let mut book = OrderBook::new();
+        book.apply_snapshot(&[price_level("100.0", "1.0")], Side::Bid);
+        book.apply_snapshot(&[price_level("101.0", "1.0")], Side::Ask);
+        let computed = book.compute_checksum(10);
+        assert!(!book.verify_checksum((computed as i64).wrapping_add(1)));
+        assert!(
+            book.checksum_failed(),
+            "mismatch must flag checksum_failed even when not logging"
+        );
+    }
+
+    #[test]
+    fn test_checksum_log_setter_and_getter() {
+        let mut book = OrderBook::new();
+        assert!(!book.checksum_log(), "defaults to false");
+        book.set_checksum_log(true);
+        assert!(book.checksum_log());
+        book.set_checksum_log(false);
+        assert!(!book.checksum_log());
+    }
+
+    #[test]
+    fn test_compute_checksum_is_deterministic() {
+        let mut book = OrderBook::new();
+        book.apply_snapshot(
+            &[price_level("100.0", "1.0"), price_level("99.0", "2.0")],
+            Side::Bid,
+        );
+        book.apply_snapshot(
+            &[price_level("101.0", "1.5"), price_level("102.0", "0.5")],
+            Side::Ask,
+        );
+        let c1 = book.compute_checksum(10);
+        let c2 = book.compute_checksum(10);
+        assert_eq!(c1, c2, "compute_checksum must be deterministic");
+    }
+
+    #[test]
+    fn test_format_number_strips_decimal_and_leading_zeros() {
+        assert_eq!(format_number(50001.5), "500015");
+        assert_eq!(format_number(0.5), "5");
+        assert_eq!(format_number(100.0), "100");
+        assert_eq!(format_number(1.0), "1");
     }
 }
