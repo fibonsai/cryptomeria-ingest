@@ -29,7 +29,13 @@ pub async fn validate_instrument(region: &str, instrument: &str) -> Result<(), I
 
     let instruments: HashSet<String> = data.into_iter().map(|p| p.url_symbol).collect();
 
-    if instruments.contains(instrument) {
+    // Bitstamp's `url_symbol`s are lowercase and separator-free (e.g. "btcusd"),
+    // but users supply the canonical pair (e.g. "BTC/USD"). Normalize before
+    // membership check so either form validates; `instrument_to_channel` is
+    // idempotent, so an already-normalized symbol still matches.
+    let normalized = crate::bitstamp::types::instrument_to_channel(instrument);
+
+    if instruments.contains(instrument) || instruments.contains(&normalized) {
         Ok(())
     } else {
         Err(IngestError::Config(format!(

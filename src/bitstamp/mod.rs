@@ -23,6 +23,7 @@ pub async fn build_channel_streams(
     let max_level_pct = config.max_level_pct;
     let max_level = config.max_level;
     let checksum_log = config.checksum_log;
+    let snapshot_delay = config.snapshot_delay;
     crate::wsloop::spawn_per_channel_streams(config, &kinds, move |kind| {
         BitstampAdapter::new(
             validated_instrument.clone(),
@@ -33,6 +34,7 @@ pub async fn build_channel_streams(
             max_level,
             kind,
             checksum_log,
+            snapshot_delay,
         )
     })
     .await
