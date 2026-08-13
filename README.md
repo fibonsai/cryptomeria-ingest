@@ -124,6 +124,7 @@ Fine-tune reconnection behavior.
 | `heartbeat_interval_secs` | `Option<u64>` | `None` | Application-level heartbeat (Kraken) |
 | `max_attempts` | `Option<u32>` | `None` | Maximum reconnect attempts (`None` or `Some(0)` = infinite) |
 | `silence_timeout_secs` | `Option<u64>` | `None` | Silence timeout in seconds; reconnects if no WS messages arrive within this window (`None` = disabled) |
+| `debug_log` | `bool` | `false` | When `true`, emit high-frequency per-message `debug!` logs (ping/pong in/out, binary/frame, parse failures) that also require the runtime log level to be `DEBUG`. Defaults to `false` to avoid flooding; lifecycle logs (`info!`/`warn!`/`error!` for connect/subscribe/disconnect/reconnect) are always emitted. See [ADR-025](docs/adr/Operations/ADR-025-20260813-wsloop-log-channel-context-and-flood-control.md). |
 
 ### `MarketDataItem`
 

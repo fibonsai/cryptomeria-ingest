@@ -50,6 +50,13 @@ Multi-exchange crypto market data ingestion library (OKX, Kraken, Bitstamp, Bitv
 - Add new data type: Extend MarketDataItem enum in src/types.rs
 - Add exchange integration test: Create new file in tests/ following existing pattern
 
+## Logging Conventions
+
+- Use structured `key=value` fields (matching the existing style), e.g. `exchange=okx instrument=BTC-USDT channel=<name> text=... error=...`.
+- Every log statement related to a WebSocket connection or channel MUST include a `channel=...` field so events can be correlated per channel. In the wsloop main loop and connection/reconnect paths the value is `channel={channel_names}` (the precomputed subscribe channel names); in the auth-wait sub-loop it is `channel=auth`.
+- High-frequency, low-signal per-message logs (ping/pong in/out, binary/frame messages, parse failures) at `debug!` level are gated behind `ResilienceConfig.debug_log` (default `false`) and additionally require the runtime log level to be `DEBUG`. Lifecycle logs (`info!`/`warn!`/`error!` for connect, subscribe, close, stream-ended, reconnect, max-reconnects, read errors) are always emitted at their level and are never gated. See [ADR-025](docs/adr/Operations/ADR-025-20260813-wsloop-log-channel-context-and-flood-control.md).
+- Do not interpolate exchange-controlled payloads (e.g. raw frame text) into `warn!`/`error!` logs at the default level unless gated behind an opt-in flag (see ADR-021/ADR-022).
+
 ## Configuration
 - See `src/config.rs` for DataSourceConfig structure
 - Supported exchanges: "okx", "kraken", "bitstamp", "bitvavo"

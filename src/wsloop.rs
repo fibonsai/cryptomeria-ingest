@@ -65,6 +65,16 @@ pub fn backoff_delay(attempt: u64, resilience: &ResilienceConfig) -> Duration {
     Duration::from_millis(ms)
 }
 
+/// Decide whether to emit a high-frequency per-message `debug!` log.
+///
+/// Such logs (per-ping/per-pong, binary/frame, parse failures) can flood output
+/// on high-throughput channels, so they are only emitted when the operator has
+/// explicitly enabled `debug_log` **and** the runtime log level is `DEBUG`.
+/// Lifecycle logs (`info!`/`warn!`/`error!`) are never gated.
+pub fn should_log_debug(debug_log: bool, debug_enabled: bool) -> bool {
+    debug_log && debug_enabled
+}
+
 type MarketDataItemStream = Pin<Box<dyn Stream<Item = Result<MarketDataItem, IngestError>> + Send>>;
 
 /// Handle returned by `run_exchange_stream` / `merge_stream_handles` — a stream
@@ -408,7 +418,7 @@ where
                                             }
                                         }
                                         Err(e) => {
-                                            warn!("[Failed to parse WS message during auth] exchange={exchange} instrument={instrument} text={text} error={e}");
+                                            warn!("[Failed to parse WS message during auth] exchange={exchange} instrument={instrument} channel=auth text={text} error={e}");
                                         }
                                     }
                                 }
@@ -432,7 +442,7 @@ where
                                 }
                                 Some(Err(e)) => {
                                     error!(
-                                        "[WS read error during auth] exchange={exchange} instrument={instrument} error={e}"
+                                        "[WS read error during auth] exchange={exchange} instrument={instrument} channel=auth error={e}"
                                     );
                                     break 'auth_wait;
                                 }
@@ -539,6 +549,10 @@ where
             let ping_sleep = tokio::time::sleep(keepalive_interval);
             tokio::pin!(ping_sleep);
 
+            // Per-message debug logs (ping/pong, binary/frame, parse failures) are
+            // high-frequency; gate them behind `debug_log` to avoid flooding.
+            let debug_log = resilience.debug_log;
+
             // Main read loop.
             'read: loop {
                 tokio::select! {
@@ -557,6 +571,11 @@ where
                                          // Check for pong response to our keepalive ping (app-level).
                                          if adapter.is_pong(&parsed) {
                                              last_pong = tokio::time::Instant::now();
+                                             if should_log_debug(debug_log, log::log_enabled!(log::Level::Debug)) {
+                                                 debug!(
+                                                     "[WS keepalive pong received (app-level)] exchange={exchange} instrument={instrument} channel={channel_names}"
+                                                 );
+                                             }
                                          }
                                          // Heartbeat handling.
                                         if adapter.handle_heartbeat(&parsed) {
@@ -574,30 +593,52 @@ where
                                         }
                                     }
                                     Err(e) => {
-                                        warn!("[Failed to parse WS message] exchange={exchange} instrument={instrument} text={text} error={e}");
+                                        if should_log_debug(debug_log, log::log_enabled!(log::Level::Debug)) {
+                                            debug!(
+                                                "[Failed to parse WS message] exchange={exchange} instrument={instrument} channel={channel_names} text={text} error={e}"
+                                            );
+                                        }
                                         // Continue; don't break the connection on parse errors.
                                     }
                                 }
                             }
                             Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(_))) => {
-                                debug!("[Unexpected binary message] exchange={exchange} instrument={instrument}");
+                                if should_log_debug(debug_log, log::log_enabled!(log::Level::Debug)) {
+                                    debug!(
+                                        "[Unexpected binary message] exchange={exchange} instrument={instrument} channel={channel_names}"
+                                    );
+                                }
                             }
                             Some(Ok(tokio_tungstenite::tungstenite::Message::Frame(_))) => {
-                                debug!("[Unexpected raw frame] exchange={exchange} instrument={instrument}");
+                                if should_log_debug(debug_log, log::log_enabled!(log::Level::Debug)) {
+                                    debug!(
+                                        "[Unexpected raw frame] exchange={exchange} instrument={instrument} channel={channel_names}"
+                                    );
+                                }
                             }
                             Some(Ok(tokio_tungstenite::tungstenite::Message::Ping(_))) => {
                                 // tungstenite handles ping/pong automatically at the ws level.
+                                if should_log_debug(debug_log, log::log_enabled!(log::Level::Debug)) {
+                                    debug!(
+                                        "[WS keepalive ping received] exchange={exchange} instrument={instrument} channel={channel_names}"
+                                    );
+                                }
                             }
                             Some(Ok(tokio_tungstenite::tungstenite::Message::Pong(_))) => {
                                 // Raw ws-level pong received — update keepalive tracking.
                                 last_pong = tokio::time::Instant::now();
+                                if should_log_debug(debug_log, log::log_enabled!(log::Level::Debug)) {
+                                    debug!(
+                                        "[WS keepalive pong received] exchange={exchange} instrument={instrument} channel={channel_names}"
+                                    );
+                                }
                             }
                             Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))) => {
                                 info!("[WS received close frame] exchange={exchange} instrument={instrument} channel={channel_names}");
                                 break 'read;
                             }
                             Some(Err(e)) => {
-                                error!("[WS read error] exchange={exchange} instrument={instrument} error={e}");
+                                error!("[WS read error] exchange={exchange} instrument={instrument} channel={channel_names} error={e}");
                                 break 'read;
                             }
                             None => {
@@ -609,7 +650,7 @@ where
                     }
                     // Check if the sender channel is closed (receiver dropped).
                     _ = tx.closed() => {
-                        info!("[Receiver dropped, shutting down] exchange={exchange} instrument={instrument}");
+                        info!("[Receiver dropped, shutting down] exchange={exchange} instrument={instrument} channel={channel_names}");
                         break 'read;
                     }
                     // Keepalive ping timer: send a ping every `keepalive_interval`.
@@ -637,9 +678,11 @@ where
                         if let Some(ref msg) = ping_msg {
                             match write.send(Message::Text(msg.clone())).await {
                                 Ok(()) => {
-                                    debug!(
-                                        "[WS keepalive ping sent] exchange={exchange} instrument={instrument}"
-                                    );
+                                    if should_log_debug(debug_log, log::log_enabled!(log::Level::Debug)) {
+                                        debug!(
+                                            "[WS keepalive ping sent] exchange={exchange} instrument={instrument} channel={channel_names}"
+                                        );
+                                    }
                                 }
                                 Err(e) => {
                                     error!(
@@ -656,9 +699,11 @@ where
                                 );
                                 break 'read;
                             }
-                            debug!(
-                                "[WS keepalive ping sent] exchange={exchange} instrument={instrument}"
-                            );
+                            if should_log_debug(debug_log, log::log_enabled!(log::Level::Debug)) {
+                                debug!(
+                                    "[WS keepalive ping sent] exchange={exchange} instrument={instrument} channel={channel_names}"
+                                );
+                            }
                         }
                         ping_sleep.as_mut().reset(
                             tokio::time::Instant::now() + keepalive_interval
@@ -810,6 +855,16 @@ mod tests {
         // Default keepalive = 5000ms → timeout = 5000 * 2 = 10000ms
         let d = keepalive_timeout(5000);
         assert_eq!(d, Duration::from_millis(10000));
+    }
+
+    #[test]
+    fn test_should_log_debug() {
+        // High-frequency per-message debug logs are emitted only when the
+        // operator has explicitly enabled `debug_log` AND the runtime log level
+        // is DEBUG. Otherwise they are suppressed to avoid flooding.
+        assert!(!should_log_debug(false, true));
+        assert!(!should_log_debug(true, false));
+        assert!(should_log_debug(true, true));
     }
 
     #[tokio::test]
